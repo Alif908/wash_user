@@ -1,12 +1,12 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_map/flutter_map.dart';
-import 'package:latlong2/latlong.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:webview_flutter/webview_flutter.dart';
 import 'package:wash_user/models/usermodel.dart';
 import 'package:wash_user/services/api_service.dart';
 import 'package:wash_user/views/homepage/profile/contact_us.dart';
-import 'package:wash_user/views/homepage/qr_scanner_page.dart';
+import 'package:wash_user/views/qrscanner/qr_scanner_page.dart';
 
 class MapPage extends StatefulWidget {
   const MapPage({super.key});
@@ -16,21 +16,25 @@ class MapPage extends StatefulWidget {
 }
 
 class _MapPageState extends State<MapPage> {
+  // ── Theme ────────────────────────────────────────────────────────────────
   static const Color _cyan = Color(0xFF00CFFF);
   static const Color _cardBg = Color(0xFF1C1C1E);
-
   static const double _navBarHeight = 80.0;
 
-  final MapController _mapController = MapController();
-  static final LatLng _defaultLocation = LatLng(10.5276, 76.2144);
+  // ── WebView ───────────────────────────────────────────────────────────────
+  late final WebViewController _webViewController;
+  bool _mapReady = false;
 
-  LatLng? _userLatLng;
+  // ── State ─────────────────────────────────────────────────────────────────
+  LatLngSimple? _userLatLng;
   String _locationLabel = 'Your location';
   List<HubModel> _hubs = [];
-  List<HubModel> _filteredHubs = []; // ✅ added for search
+  List<HubModel> _filteredHubs = [];
   bool _isLoadingHubs = false;
   String? _error;
-  double _currentZoom = 13.0;
+
+  // ── Hub selected from map tap ─────────────────────────────────────────────
+  HubModel? _pendingHubFromMap;
 
   @override
   void initState() {
@@ -41,9 +45,58 @@ class _MapPageState extends State<MapPage> {
         statusBarIconBrightness: Brightness.dark,
       ),
     );
+    _initWebView();
     _initLocation();
   }
 
+  // ── WebView setup ─────────────────────────────────────────────────────────
+  void _initWebView() {
+    _webViewController = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..addJavaScriptChannel(
+        'HereMapChannel',
+        onMessageReceived: (msg) => _onMapMessage(msg.message),
+      )
+      ..setNavigationDelegate(
+        NavigationDelegate(
+          onPageFinished: (_) {
+            setState(() => _mapReady = true);
+            _syncMapState();
+          },
+        ),
+      )
+      ..loadFlutterAsset('assets/map.html');
+  }
+
+  // ── Sync current state to map after ready ─────────────────────────────────
+  void _syncMapState() {
+    if (!_mapReady) return;
+    if (_userLatLng != null) {
+      _js('flutterInit(${_userLatLng!.lat}, ${_userLatLng!.lng}, 14)');
+      _js('flutterSetUserMarker(${_userLatLng!.lat}, ${_userLatLng!.lng})');
+    } else {
+      _js('flutterInit(10.5276, 76.2144, 13)');
+    }
+    if (_filteredHubs.isNotEmpty) _pushHubMarkers();
+  }
+
+  void _js(String script) {
+    _webViewController.runJavaScript(script).catchError((_) {});
+  }
+
+  // ── Handle taps from map JS ───────────────────────────────────────────────
+  void _onMapMessage(String raw) {
+    try {
+      final map = jsonDecode(raw) as Map<String, dynamic>;
+      if (map['type'] == 'hubTap') {
+        final hub = HubModel.fromJson(map['hub'] as Map<String, dynamic>);
+        if (!mounted) return;
+        _showHubSheet(hub);
+      }
+    } catch (_) {}
+  }
+
+  // ── Location ──────────────────────────────────────────────────────────────
   Future<void> _initLocation() async {
     try {
       bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
@@ -62,7 +115,6 @@ class _MapPageState extends State<MapPage> {
           return;
         }
       }
-
       if (permission == LocationPermission.deniedForever) {
         if (!mounted) return;
         setState(
@@ -76,13 +128,16 @@ class _MapPageState extends State<MapPage> {
       );
       if (!mounted) return;
 
-      final userLatLng = LatLng(pos.latitude, pos.longitude);
       setState(() {
-        _userLatLng = userLatLng;
+        _userLatLng = LatLngSimple(pos.latitude, pos.longitude);
         _locationLabel = 'Your location';
       });
 
-      _mapController.move(userLatLng, 14);
+      if (_mapReady) {
+        _js('flutterMoveToLocation(${pos.latitude}, ${pos.longitude}, 14)');
+        _js('flutterSetUserMarker(${pos.latitude}, ${pos.longitude})');
+      }
+
       await ApiService.updateLocation(pos.latitude, pos.longitude);
       _loadNearestHubs();
     } catch (e) {
@@ -92,12 +147,12 @@ class _MapPageState extends State<MapPage> {
     }
   }
 
+  // ── Hubs ──────────────────────────────────────────────────────────────────
   Future<void> _loadNearestHubs() async {
     setState(() {
       _isLoadingHubs = true;
       _error = null;
     });
-
     final result = await ApiService.getNearestHubs();
     if (!mounted) return;
 
@@ -108,9 +163,10 @@ class _MapPageState extends State<MapPage> {
           .toList();
       setState(() {
         _hubs = hubs;
-        _filteredHubs = hubs; // ✅ init filtered list
+        _filteredHubs = hubs;
         _isLoadingHubs = false;
       });
+      _pushHubMarkers();
     } else {
       setState(() {
         _error = result.errorMessage;
@@ -119,14 +175,38 @@ class _MapPageState extends State<MapPage> {
     }
   }
 
+  void _pushHubMarkers() {
+    if (!_mapReady) return;
+    final jsonStr = jsonEncode(
+      _filteredHubs
+          .map(
+            (h) => {
+              'latitude': h.latitude,
+              'longitude': h.longitude,
+              'hubName': h.hubName,
+              'address': h.address,
+              'operatorName': h.operatorName,
+              'operatorMobile': h.operatorMobile,
+              'deviceCount': h.deviceCount,
+            },
+          )
+          .toList(),
+    );
+    // escape single-quotes for JS string
+    final escaped = jsonStr.replaceAll("'", "\\'");
+    _js("flutterSetHubMarkers('$escaped')");
+  }
+
+  // ── My Location FAB ───────────────────────────────────────────────────────
   void _goToMyLocation() {
     if (_userLatLng == null) {
       _initLocation();
       return;
     }
-    _mapController.move(_userLatLng!, 15);
+    _js('flutterMoveToLocation(${_userLatLng!.lat}, ${_userLatLng!.lng}, 15)');
   }
 
+  // ── Hub Bottom Sheet ──────────────────────────────────────────────────────
   void _showHubSheet(HubModel hub) {
     showModalBottomSheet(
       context: context,
@@ -139,7 +219,7 @@ class _MapPageState extends State<MapPage> {
     );
   }
 
-  // ✅ Search sheet — opened from tune FAB and top search bar
+  // ── Search Sheet ──────────────────────────────────────────────────────────
   void _showSearchSheet() {
     showModalBottomSheet(
       context: context,
@@ -156,76 +236,19 @@ class _MapPageState extends State<MapPage> {
           Navigator.pop(ctx);
           _showHubSheet(hub);
           if (hub.latitude != null && hub.longitude != null) {
-            _mapController.move(LatLng(hub.latitude!, hub.longitude!), 15);
+            _js('flutterMoveToLocation(${hub.latitude}, ${hub.longitude}, 15)');
           }
         },
         onFilterApplied: (filtered) {
           setState(() => _filteredHubs = filtered);
+          _pushHubMarkers();
           Navigator.pop(ctx);
         },
       ),
     );
   }
 
-  List<Marker> _buildMarkers() {
-    final markers = <Marker>[];
-
-    if (_userLatLng != null) {
-      markers.add(
-        Marker(
-          point: _userLatLng!,
-          width: 40,
-          height: 40,
-          builder: (ctx) => Container(
-            decoration: BoxDecoration(
-              color: _cyan.withOpacity(0.2),
-              shape: BoxShape.circle,
-              border: Border.all(color: _cyan, width: 2.5),
-            ),
-            child: const Center(
-              child: CircleAvatar(radius: 7, backgroundColor: _cyan),
-            ),
-          ),
-        ),
-      );
-    }
-
-    // ✅ Use _filteredHubs for markers
-    for (final hub in _filteredHubs) {
-      if (hub.latitude == null || hub.longitude == null) continue;
-      markers.add(
-        Marker(
-          point: LatLng(hub.latitude!, hub.longitude!),
-          width: 44,
-          height: 44,
-          builder: (ctx) => GestureDetector(
-            onTap: () => _showHubSheet(hub),
-            child: Container(
-              decoration: BoxDecoration(
-                color: _cyan,
-                shape: BoxShape.circle,
-                boxShadow: [
-                  BoxShadow(
-                    color: _cyan.withOpacity(0.4),
-                    blurRadius: 8,
-                    spreadRadius: 2,
-                  ),
-                ],
-              ),
-              child: const Icon(
-                Icons.local_laundry_service,
-                color: Colors.black,
-                size: 22,
-              ),
-            ),
-          ),
-        ),
-      );
-    }
-
-    return markers;
-  }
-
+  // ── Build ─────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
     final topPad = MediaQuery.of(context).padding.top;
@@ -237,37 +260,16 @@ class _MapPageState extends State<MapPage> {
       extendBody: true,
       body: Stack(
         children: [
-          // ── Full Screen Map ───────────────────────────────────────────
-          Positioned.fill(
-            child: FlutterMap(
-              mapController: _mapController,
-              options: MapOptions(
-                center: _defaultLocation,
-                zoom: _currentZoom,
-                onPositionChanged: (pos, _) {
-                  if (pos.zoom != null) {
-                    setState(() => _currentZoom = pos.zoom!);
-                  }
-                },
-              ),
-              children: [
-                TileLayer(
-                  urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                  userAgentPackageName: 'com.wash_user.app',
-                  maxZoom: 19,
-                ),
-                MarkerLayer(markers: _buildMarkers()),
-              ],
-            ),
-          ),
+          // ── Full Screen HERE Map (WebView) ──────────────────────────────
+          Positioned.fill(child: WebViewWidget(controller: _webViewController)),
 
-          // ── Top Search Bar (now tappable) ─────────────────────────────
+          // ── Top Search Bar (tappable) ───────────────────────────────────
           Positioned(
             top: topPad + 8,
             left: 16,
             right: 72,
             child: GestureDetector(
-              onTap: _showSearchSheet, // ✅ tap to search
+              onTap: _showSearchSheet,
               child: Container(
                 height: 50,
                 padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -284,11 +286,6 @@ class _MapPageState extends State<MapPage> {
                 ),
                 child: Row(
                   children: [
-                    // const Icon(
-                    //   Icons.location_on,
-                    //   color: Colors.white54,
-                    //   size: 18,
-                    // ),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
@@ -316,7 +313,7 @@ class _MapPageState extends State<MapPage> {
             ),
           ),
 
-          // ── Right FABs ────────────────────────────────────────────────
+          // ── Right FABs ──────────────────────────────────────────────────
           Positioned(
             top: topPad + 8,
             right: 16,
@@ -333,7 +330,7 @@ class _MapPageState extends State<MapPage> {
                 ),
                 const SizedBox(height: 12),
 
-                // ✅ Tune → opens search/filter sheet (same icon, now working)
+                // Tune → Search/Filter Sheet
                 _MapFab(icon: Icons.tune, onTap: _showSearchSheet),
                 const SizedBox(height: 12),
 
@@ -382,7 +379,7 @@ class _MapPageState extends State<MapPage> {
             ),
           ),
 
-          // ── Error Banner ──────────────────────────────────────────────
+          // ── Error Banner ────────────────────────────────────────────────
           if (_error != null)
             Positioned(
               top: topPad + 70,
@@ -405,7 +402,7 @@ class _MapPageState extends State<MapPage> {
               ),
             ),
 
-          // ── Hubs Horizontal Scroll ────────────────────────────────────
+          // ── Hubs Horizontal Scroll ──────────────────────────────────────
           if (_filteredHubs.isNotEmpty)
             Positioned(
               bottom: bottomOffset + 12,
@@ -426,9 +423,8 @@ class _MapPageState extends State<MapPage> {
                       onTap: () {
                         _showHubSheet(hub);
                         if (hub.latitude != null && hub.longitude != null) {
-                          _mapController.move(
-                            LatLng(hub.latitude!, hub.longitude!),
-                            15,
+                          _js(
+                            'flutterMoveToLocation(${hub.latitude}, ${hub.longitude}, 15)',
                           );
                         }
                       },
@@ -438,7 +434,7 @@ class _MapPageState extends State<MapPage> {
               ),
             ),
 
-          // ── OSM Attribution ───────────────────────────────────────────
+          // ── OSM-style Attribution ───────────────────────────────────────
           Positioned(
             bottom: bottomOffset + 4,
             right: 4,
@@ -449,7 +445,7 @@ class _MapPageState extends State<MapPage> {
                 borderRadius: BorderRadius.circular(4),
               ),
               child: const Text(
-                '© OpenStreetMap contributors',
+                '© HERE Maps',
                 style: TextStyle(fontSize: 9, color: Colors.black87),
               ),
             ),
@@ -458,6 +454,12 @@ class _MapPageState extends State<MapPage> {
       ),
     );
   }
+}
+
+// ── Simple LatLng helper (no flutter_map dependency) ──────────────────────────
+class LatLngSimple {
+  final double lat, lng;
+  const LatLngSimple(this.lat, this.lng);
 }
 
 // ── Search Sheet ──────────────────────────────────────────────────────────────
@@ -534,7 +536,7 @@ class _SearchSheetState extends State<_SearchSheet> {
               ),
             ),
             const SizedBox(height: 16),
-            // Search field — styled to match existing app dark theme
+            // Search field
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: Container(
@@ -589,7 +591,7 @@ class _SearchSheetState extends State<_SearchSheet> {
               ),
             ),
             const SizedBox(height: 8),
-            // Count
+            // Count label
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20),
               child: Align(
@@ -601,7 +603,7 @@ class _SearchSheetState extends State<_SearchSheet> {
               ),
             ),
             const SizedBox(height: 4),
-            // Results
+            // Results list
             Flexible(
               child: _results.isEmpty
                   ? const Padding(
@@ -783,6 +785,7 @@ class _HubBottomSheet extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // Drag handle
           Center(
             child: Container(
               width: 40,

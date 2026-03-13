@@ -9,7 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 class ApiService {
   // ── Base URL ─────────────────────────────────────────────────────────
-  // Your PC WiFi IP: 192.168.1.8  |  Port: 5000
+  // Your PC WiFi IP: 192.168.1.5  |  Port: 5000
   // Phone & PC must be on the SAME WiFi network
   static const String baseUrl = "http://192.168.1.3:5000/api/user";
 

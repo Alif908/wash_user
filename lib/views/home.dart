@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:wash_user/views/homepage/map_page.dart';
 import 'package:wash_user/views/homepage/profile/profile_page.dart';
-import 'package:wash_user/views/homepage/qr_scanner_page.dart';
+import 'package:wash_user/views/qrscanner/qr_scanner_page.dart';
 
 class Home extends StatefulWidget {
   final int initialTabIndex;

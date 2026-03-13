@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+    <script src="https://js.api.here.com/v3/3.1/mapsjs-core.js"></script>
+    <script src="https://js.api.here.com/v3/3.1/mapsjs-service.js"></script>
+    <script src="https://js.api.here.com/v3/3.1/mapsjs-mapevents.js"></script>
+    <script src="https://js.api.here.com/v3/3.1/mapsjs-ui.js"></script>
+    <link rel="stylesheet" href="https://js.api.here.com/v3/3.1/mapsjs-ui.css" />
+
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html,
+        body,
+        #map {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+        }
+
+        /* Hide default HERE UI controls — Flutter overlays handle them */
+        .H_ui {
+            display: none !important;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="map"></div>
+
+    <script>
+        // ── Init ──────────────────────────────────────────────────────────
+        var platform = new H.service.Platform({
+            apikey: "TzoKZZSji40pspFwxgNIHcOPxjdiSu35PP-y94uD3bY"
+        });
+
+        var defaultLayers = platform.createDefaultLayers();
+
+        var map = new H.Map(
+            document.getElementById('map'),
+            defaultLayers.vector.normal.map,
+            {
+                zoom: 13,
+                center: { lat: 10.5276, lng: 76.2144 },
+                pixelRatio: window.devicePixelRatio || 1
+            }
+        );
+
+        // Enable map interaction (pan / pinch-zoom)
+        var behavior = new H.mapevents.Behavior(new H.mapevents.MapEvents(map));
+
+        // Resize map when window size changes
+        window.addEventListener('resize', function () {
+            map.getViewPort().resize();
+        });
+
+        // ── Marker references ─────────────────────────────────────────────
+        var userMarker = null;
+        var hubMarkerGroup = new H.map.Group();
+        map.addObject(hubMarkerGroup);
+
+        // ── User location marker (cyan dot) ───────────────────────────────
+        function flutterSetUserMarker(lat, lng) {
+            if (userMarker) map.removeObject(userMarker);
+
+            var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 40 40">'
+                + '<circle cx="20" cy="20" r="18" fill="rgba(0,207,255,0.2)" stroke="#00CFFF" stroke-width="2.5"/>'
+                + '<circle cx="20" cy="20" r="7" fill="#00CFFF"/>'
+                + '</svg>';
+
+            var icon = new H.map.Icon(svg, {
+                size: { w: 40, h: 40 },
+                anchor: { x: 20, y: 20 }
+            });
+
+            userMarker = new H.map.Marker({ lat: lat, lng: lng }, { icon: icon });
+            map.addObject(userMarker);
+        }
+
+        // ── Hub markers (cyan circle with laundry icon) ───────────────────
+        function flutterSetHubMarkers(hubsJson) {
+            hubMarkerGroup.removeAll();
+
+            var hubs;
+            try { hubs = JSON.parse(hubsJson); } catch (e) { return; }
+
+            hubs.forEach(function (hub) {
+                if (!hub.latitude || !hub.longitude) return;
+
+                var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="44" height="44" viewBox="0 0 44 44">'
+                    + '<circle cx="22" cy="22" r="20" fill="#00CFFF"/>'
+                    + '<text x="22" y="28" text-anchor="middle" font-size="18" fill="#000000" font-family="sans-serif">&#x2B58;</text>'
+                    + '</svg>';
+
+                var icon = new H.map.Icon(svg, {
+                    size: { w: 44, h: 44 },
+                    anchor: { x: 22, y: 22 }
+                });
+
+                var marker = new H.map.Marker(
+                    { lat: hub.latitude, lng: hub.longitude },
+                    { icon: icon }
+                );
+
+                // Store hub data on marker for tap
+                marker.setData(hub);
+
+                // Tap -> send hub back to Flutter
+                marker.addEventListener('tap', function (evt) {
+                    var data = evt.target.getData();
+                    if (window.HereMapChannel) {
+                        window.HereMapChannel.postMessage(
+                            JSON.stringify({ type: 'hubTap', hub: data })
+                        );
+                    }
+                });
+
+                hubMarkerGroup.addObject(marker);
+            });
+        }
+
+        // ── Move map to coordinates ────────────────────────────────────────
+        function flutterMoveToLocation(lat, lng, zoom) {
+            map.setCenter({ lat: lat, lng: lng });
+            map.setZoom(zoom || 15);
+        }
+
+        // ── Init with user location (called from Flutter after page loads) ─
+        function flutterInit(lat, lng, zoom) {
+            map.setCenter({ lat: lat, lng: lng });
+            map.setZoom(zoom || 14);
+        }
+    </script>
+
+</body>
+
+</html>
