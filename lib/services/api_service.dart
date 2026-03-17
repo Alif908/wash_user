@@ -45,7 +45,7 @@ class ApiService {
   // ─────────────────────────────────────────────────────────────────────
   // 1. SEND OTP
   // POST /api/user/send-otp
-  // Body: { "phone": "+91XXXXXXXXXX" }
+  // Body: { "mobile": "+91XXXXXXXXXX", "name": "User" }
   // ─────────────────────────────────────────────────────────────────────
   static Future<ApiResult> sendOtp(String phone) async {
     try {
@@ -78,7 +78,7 @@ class ApiService {
   // ─────────────────────────────────────────────────────────────────────
   // 2. VERIFY OTP
   // POST /api/user/verify-otp
-  // Body: { "phone": "+91XXXXXXXXXX", "otp": "1234" }
+  // Body: { "mobile": "+91XXXXXXXXXX", "otp": "1234" }
   // Response: { "token": "...", "user": { ... } }
   // ─────────────────────────────────────────────────────────────────────
   static Future<ApiResult> verifyOtp(String phone, String otp) async {
@@ -240,7 +240,7 @@ class ApiService {
   // ─────────────────────────────────────────────────────────────────────
   // 8. CREATE ORDER
   // POST /api/user/create-order  [auth required]
-  // Body: { "packageId": "...", "hubDeviceId": "..." }
+  // Body: { "packageId": "...", "hubDeviceId": "...", "couponCode"?: "..." }
   // ─────────────────────────────────────────────────────────────────────
   static Future<ApiResult> createOrder(Map<String, dynamic> orderData) async {
     try {
@@ -262,7 +262,8 @@ class ApiService {
   // ─────────────────────────────────────────────────────────────────────
   // 9. VERIFY PAYMENT
   // POST /api/user/verify-payment  [auth required]
-  // Body: { "razorpay_order_id": "...", "razorpay_payment_id": "...", "razorpay_signature": "..." }
+  // Body: { "razorpay_order_id": "...", "razorpay_payment_id": "...",
+  //         "razorpay_signature": "...", "sessionData": { ... } }
   // ─────────────────────────────────────────────────────────────────────
   static Future<ApiResult> verifyPayment(
     Map<String, dynamic> paymentData,
@@ -284,7 +285,57 @@ class ApiService {
   }
 
   // ─────────────────────────────────────────────────────────────────────
-  // 10. SUBMIT FEEDBACK
+  // 10. VALIDATE COUPON  ✅ NEW — fixes "Invalid coupon code" bug
+  // POST /api/user/validate-coupon  [auth required]
+  // Body: { "couponCode": "0908" }
+  // Response: { "discountPercentage": 50, ... }
+  //
+  // ⚠️  If your backend route name differs, update the URL below.
+  //     Open userRoutes.js and search for your coupon route. Examples:
+  //       POST /api/user/apply-coupon
+  //       POST /api/user/coupon/validate
+  //       GET  /api/user/validate-coupon?code=0908
+  // ─────────────────────────────────────────────────────────────────────
+  static Future<ApiResult> validateCoupon(
+    String couponCode,
+    double amount,
+  ) async {
+    // ✅ FIX: coupon route is at /api/coupon/verify-coupon (couponRoutes.js)
+    // The route /api/user/validate-coupon does NOT exist in userRoutes.js
+    // couponRoutes.js has: router.post('/verify-coupon', userMiddleware, verifyCoupon)
+    // server.js mounts it as: app.use('/api/coupon', couponRoutes)
+    // So the correct full URL is: /api/coupon/verify-coupon
+    const couponBaseUrl = "http://192.168.1.4:5000/api/coupon";
+    try {
+      developer.log('── VALIDATE COUPON ───────────────', name: 'ApiService');
+      developer.log('URL  : $couponBaseUrl/verify-coupon', name: 'ApiService');
+      developer.log(
+        'BODY : ${jsonEncode({'couponCode': couponCode, 'amount': amount})}',
+        name: 'ApiService',
+      );
+
+      final response = await http
+          .post(
+            Uri.parse('$couponBaseUrl/verify-coupon'),
+            headers: await _authHeaders,
+            body: jsonEncode({'couponCode': couponCode, 'amount': amount}),
+          )
+          .timeout(const Duration(seconds: 15));
+
+      developer.log('STATUS : ${response.statusCode}', name: 'ApiService');
+      developer.log('BODY   : ${response.body}', name: 'ApiService');
+
+      return _handleResponse(response);
+    } on TimeoutException {
+      return ApiResult.error('Request timed out.');
+    } catch (e) {
+      developer.log('ERROR : $e', name: 'ApiService', error: e);
+      return ApiResult.error('Network error: $e');
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // 11. SUBMIT FEEDBACK
   // POST /api/user/submit-feedback  [auth required]
   // Body: { "rating": 5, "comment": "Great service!" }
   // ─────────────────────────────────────────────────────────────────────
@@ -308,7 +359,7 @@ class ApiService {
   }
 
   // ─────────────────────────────────────────────────────────────────────
-  // 11. GET WASH HISTORY
+  // 12. GET WASH HISTORY
   // GET /api/user/wash-history  [auth required]
   // ─────────────────────────────────────────────────────────────────────
   static Future<ApiResult> getWashHistory() async {
@@ -325,7 +376,7 @@ class ApiService {
   }
 
   // ─────────────────────────────────────────────────────────────────────
-  // 12. GET WASH HISTORY BY ID
+  // 13. GET WASH HISTORY BY ID
   // GET /api/user/wash-history/:washHistoryId  [auth required]
   // ─────────────────────────────────────────────────────────────────────
   static Future<ApiResult> getWashHistoryById(String washHistoryId) async {
@@ -345,7 +396,7 @@ class ApiService {
   }
 
   // ─────────────────────────────────────────────────────────────────────
-  // 13. GET HUB OWNER CONTACT
+  // 14. GET HUB OWNER CONTACT
   // GET /api/user/hub/:hubId/contact  [auth required]
   // ─────────────────────────────────────────────────────────────────────
   static Future<ApiResult> getHubOwnerContact(String hubId) async {

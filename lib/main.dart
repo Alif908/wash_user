@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:wash_user/views/login_page.dart';
+import 'package:wash_user/views/qrscanner/payment_failed_page.dart';
+import 'package:wash_user/views/qrscanner/payment_successfull.dart';
 
 void main() {
   runApp(const CleanWashApp());

@@ -2,12 +2,16 @@
 
 import 'package:flutter/material.dart';
 import 'package:razorpay_flutter/razorpay_flutter.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:wash_user/models/usermodel.dart';
 import 'package:wash_user/services/api_service.dart';
 
+import 'package:wash_user/views/qrscanner/payment_failed_page.dart';
+import 'package:wash_user/views/qrscanner/payment_successfull.dart';
+
 // ─────────────────────────────────────────────────────────────────────────────
-// Theme constants
+// Theme
 // ─────────────────────────────────────────────────────────────────────────────
 class _C {
   const _C._();
@@ -18,12 +22,13 @@ class _C {
   static const Color red = Colors.redAccent;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Screen
+const List<String> _kTimeLabels = ['5 min', '10 min', '20 min'];
+const String _kRazorpayLiveKey = 'rzp_live_4UquzHIwrVUBE6';
+const int _kPaymentTimeout = 600;
+
 // ─────────────────────────────────────────────────────────────────────────────
 class BookMachineScreen extends StatefulWidget {
   const BookMachineScreen({super.key, required this.device, required this.hub});
-
   final HubDeviceModel device;
   final HubModel hub;
 
@@ -32,22 +37,28 @@ class BookMachineScreen extends StatefulWidget {
 }
 
 class _BookMachineScreenState extends State<BookMachineScreen> {
-  // ── Package state ─────────────────────────────────────────────────────
+  // ── Packages ──────────────────────────────────────────────────────────
   List<HubPackageModel> _packages = [];
   bool _pkgLoading = true;
   String? _pkgError;
   int _selectedPkg = 0;
 
-  // ── Coupon state ──────────────────────────────────────────────────────
+  // ── Coupon ────────────────────────────────────────────────────────────
   final TextEditingController _couponCtrl = TextEditingController();
   bool _couponLoading = false;
   String? _couponError;
   int _discountPct = 0;
   bool _couponApplied = false;
 
-  // ── Order / payment state ─────────────────────────────────────────────
-  bool _orderLoading = false;
+  // ── Payment ───────────────────────────────────────────────────────────
+  bool _isProcessing = false;
+  String? _pendingOrderId;
+  Map<String, dynamic>? _sessionData;
   late Razorpay _razorpay;
+
+  // ── User info ─────────────────────────────────────────────────────────
+  String _userMobile = '';
+  String _userName = 'User';
 
   // ── Computed ──────────────────────────────────────────────────────────
   HubPackageModel? get _currentPkg =>
@@ -67,70 +78,599 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
     super.initState();
     _initRazorpay();
     _fetchPackages();
-    debugPrint('');
-    debugPrint('╔══════════════════════════════════════════╗');
-    debugPrint('║     BOOK MACHINE SCREEN  →  OPENED       ║');
-    debugPrint('╠══════════════════════════════════════════╣');
-    debugPrint('║  Hub    → ${widget.hub.hubName}');
-    debugPrint(
-      '║  Device → ${widget.device.deviceCode} (id: ${widget.device.id})',
-    );
-    debugPrint('║  Status → ${widget.device.connectivityStatus}');
-    debugPrint('╚══════════════════════════════════════════╝');
-    debugPrint('');
+    _loadUserData();
+
+    debugPrint('╔══════════════════════════════════════════════════╗');
+    debugPrint('║        BOOK MACHINE SCREEN — OPENED              ║');
+    debugPrint('║  Hub      → ${widget.hub.hubName}');
+    debugPrint('║  Hub ID   → ${widget.hub.id}');
+    debugPrint('║  Device   → ${widget.device.deviceCode}');
+    debugPrint('║  Dev ID   → ${widget.device.id}');
+    debugPrint('║  Online?  → ${widget.device.isOnline}');
+    debugPrint('╚══════════════════════════════════════════════════╝');
   }
 
   @override
   void dispose() {
+    debugPrint('   [LIFECYCLE] BookMachineScreen disposed');
     _couponCtrl.dispose();
-    _razorpay.clear();
-    debugPrint('   [BookMachine] Screen disposed');
+    try {
+      _razorpay.clear();
+    } catch (_) {}
     super.dispose();
   }
 
   // ─────────────────────────────────────────────────────────────────────
-  // API : FETCH PACKAGES  —  GET /api/user/packages
+  // USER DATA
+  // ─────────────────────────────────────────────────────────────────────
+
+  Future<void> _loadUserData() async {
+    debugPrint('   [USER] Loading from SharedPreferences...');
+    final prefs = await SharedPreferences.getInstance();
+    final mobile = prefs.getString('user_mobile') ?? '';
+    final name = prefs.getString('user_name') ?? 'User';
+    debugPrint('   [USER] mobile = $mobile');
+    debugPrint('   [USER] name   = $name');
+    setState(() {
+      _userMobile = mobile;
+      _userName = name;
+    });
+    debugPrint('   [USER] Loaded ✅');
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // RAZORPAY INIT
+  // ─────────────────────────────────────────────────────────────────────
+
+  void _initRazorpay() {
+    debugPrint('   [RAZORPAY] Initializing...');
+    try {
+      _razorpay = Razorpay();
+      _razorpay.on(Razorpay.EVENT_PAYMENT_SUCCESS, _handlePaymentSuccess);
+      _razorpay.on(Razorpay.EVENT_PAYMENT_ERROR, _handlePaymentError);
+      _razorpay.on(Razorpay.EVENT_EXTERNAL_WALLET, _handleExternalWallet);
+      debugPrint('   [RAZORPAY] Initialized ✅');
+    } catch (e) {
+      debugPrint('   [RAZORPAY] ❌ Init error → $e');
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _showErrorDialog(
+          'Initialization Error',
+          'Payment gateway initialization failed. Please restart the app.',
+        );
+      });
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // RAZORPAY — SUCCESS
+  // ─────────────────────────────────────────────────────────────────────
+
+  void _handlePaymentSuccess(PaymentSuccessResponse response) async {
+    debugPrint('');
+    debugPrint('╔══════════════════════════════════════════════════╗');
+    debugPrint('║           PAYMENT SUCCESS CALLBACK               ║');
+    debugPrint('╚══════════════════════════════════════════════════╝');
+    debugPrint('   paymentId   → ${response.paymentId}');
+    debugPrint('   orderId     → ${response.orderId}');
+    debugPrint('   signature   → ${response.signature}');
+    debugPrint('   _sessionData at callback → $_sessionData');
+
+    if (_isProcessing) {
+      debugPrint('   ⚠️ Already processing — ignoring duplicate callback');
+      return;
+    }
+    setState(() => _isProcessing = true);
+    debugPrint('   [STATE] _isProcessing = true');
+
+    if (_sessionData == null) {
+      debugPrint('   ❌ _sessionData is NULL — cannot verify payment!');
+      if (mounted) {
+        _showErrorDialog(
+          'Booking Failed',
+          'Session data missing. Please try booking again.',
+        );
+        setState(() => _isProcessing = false);
+      }
+      return;
+    }
+
+    try {
+      final payload = {
+        'razorpay_order_id': response.orderId,
+        'razorpay_payment_id': response.paymentId,
+        'razorpay_signature': response.signature,
+        'sessionData': _sessionData,
+      };
+
+      debugPrint('');
+      debugPrint('   ── Calling verifyPayment ──────────────────────');
+      debugPrint('   Payload → $payload');
+
+      final result = await ApiService.verifyPayment(payload);
+
+      debugPrint('   [VERIFY] success      → ${result.success}');
+      debugPrint('   [VERIFY] data         → ${result.data}');
+      debugPrint('   [VERIFY] errorMessage → ${result.errorMessage}');
+
+      if (!mounted) {
+        debugPrint('   ⚠️ Widget unmounted after verifyPayment — aborting');
+        return;
+      }
+
+      if (result.success) {
+        debugPrint(
+          '   ✅ Verification passed — navigating to PaymentSuccessPage',
+        );
+        Navigator.pushAndRemoveUntil(
+          context,
+          MaterialPageRoute(
+            builder: (_) => PaymentSuccessPage(
+              amountPaid: _finalPrice.toStringAsFixed(0),
+              deviceCode: widget.device.deviceCode,
+              paymentId: response.paymentId,
+              onGoHome: () => Navigator.of(context).popUntil((r) => r.isFirst),
+            ),
+          ),
+          (route) => false,
+        );
+      } else {
+        debugPrint('   ❌ Verification failed → ${result.errorMessage}');
+        _showErrorDialog(
+          'Booking Failed',
+          'Payment successful but verification failed: '
+              '${result.errorMessage ?? 'Unknown error'}',
+        );
+      }
+    } catch (e, stack) {
+      debugPrint('   ❌ Exception in _handlePaymentSuccess → $e');
+      debugPrint('   Stack → $stack');
+      if (mounted) {
+        _showErrorDialog(
+          'Booking Failed',
+          'Payment successful but booking failed: '
+              '${e.toString().replaceFirst('Exception: ', '')}',
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isProcessing = false);
+        debugPrint('   [STATE] _isProcessing = false (finally)');
+      }
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // RAZORPAY — ERROR
+  // ─────────────────────────────────────────────────────────────────────
+
+  void _handlePaymentError(PaymentFailureResponse response) {
+    debugPrint('');
+    debugPrint('╔══════════════════════════════════════════════════╗');
+    debugPrint('║           PAYMENT ERROR CALLBACK                 ║');
+    debugPrint('╚══════════════════════════════════════════════════╝');
+    debugPrint('   code    → ${response.code}');
+    debugPrint('   message → ${response.message}');
+
+    if (!mounted || _isProcessing) {
+      debugPrint('   ⚠️ Not mounted or already processing — skipping');
+      return;
+    }
+    setState(() => _isProcessing = false);
+
+    if (response.code == 0 ||
+        response.message?.toLowerCase().contains('cancel') == true ||
+        response.message?.toLowerCase().contains('user cancelled') == true ||
+        response.code == Razorpay.PAYMENT_CANCELLED) {
+      debugPrint('   ℹ️ Payment cancelled by user — showing snack');
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Payment cancelled'),
+          duration: Duration(seconds: 2),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
+    String msg = 'Payment failed. Please try again.';
+    if (response.code == Razorpay.NETWORK_ERROR) {
+      msg = 'Network error. Check your internet and try again.';
+    } else if (response.code == Razorpay.INVALID_OPTIONS) {
+      msg = 'Payment configuration error. Please contact support.';
+    } else if (response.message != null && response.message!.isNotEmpty) {
+      msg = response.message!;
+    }
+
+    debugPrint('   ❌ Real failure — navigating to PaymentFailedPage');
+    debugPrint('   Reason → $msg');
+
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(
+        builder: (_) => PaymentFailedPage(
+          reason: msg,
+          onRetry: () => Navigator.pop(context),
+          onGoHome: () => Navigator.of(context).popUntil((r) => r.isFirst),
+        ),
+      ),
+    );
+  }
+
+  void _handleExternalWallet(ExternalWalletResponse response) {
+    debugPrint('   [RAZORPAY] External wallet → ${response.walletName}');
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('External wallet: ${response.walletName}')),
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // MAIN PAYMENT FLOW
+  // ─────────────────────────────────────────────────────────────────────
+
+  Future<void> _processPayment() async {
+    debugPrint('');
+    debugPrint('╔══════════════════════════════════════════════════╗');
+    debugPrint('║            PROCESS PAYMENT — START               ║');
+    debugPrint('╚══════════════════════════════════════════════════╝');
+
+    if (_isProcessing) {
+      debugPrint('   ⚠️ Already in progress — ignoring tap');
+      return;
+    }
+    if (_currentPkg == null) {
+      debugPrint('   ⚠️ No package selected — aborting');
+      return;
+    }
+
+    debugPrint(
+      '   Package   → ${_currentPkg!.packageName} (id: ${_currentPkg!.id})',
+    );
+    debugPrint('   BasePrice → ₹$_basePrice');
+    debugPrint('   Discount  → $_discountPct%  (₹$_discount)');
+    debugPrint('   Final     → ₹$_finalPrice');
+    debugPrint(
+      '   Coupon    → applied=$_couponApplied  code=${_couponCtrl.text}',
+    );
+    debugPrint('   Device online? → ${widget.device.isOnline}');
+
+    if (!widget.device.isOnline) {
+      debugPrint('   ❌ Device offline — showing error');
+      _showErrorDialog(
+        'Device Offline',
+        'Device is offline. Please try another device.',
+      );
+      return;
+    }
+
+    setState(() => _isProcessing = true);
+    debugPrint('   [STATE] _isProcessing = true');
+
+    BuildContext? dialogCtx;
+
+    try {
+      debugPrint('   Showing loading dialog...');
+      if (mounted) {
+        showDialog(
+          context: context,
+          barrierDismissible: false,
+          builder: (BuildContext ctx) {
+            dialogCtx = ctx;
+            return WillPopScope(
+              onWillPop: () async => false,
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.all(28),
+                  decoration: BoxDecoration(
+                    color: _C.card,
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: const Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      CircularProgressIndicator(
+                        valueColor: AlwaysStoppedAnimation(_C.cyan),
+                      ),
+                      SizedBox(height: 16),
+                      Text(
+                        'Creating payment order...',
+                        style: TextStyle(color: Colors.white, fontSize: 14),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      }
+
+      // ✅ FIX: extract couponCode once so it is used consistently in
+      // both orderData (sent to backend) AND stored for session logging.
+      // Previously the inline if-spread was correct but hard to trace in logs.
+      final String? appliedCoupon =
+          (_couponApplied && _couponCtrl.text.trim().isNotEmpty)
+          ? _couponCtrl.text.trim().toUpperCase()
+          : null;
+
+      final orderData = <String, dynamic>{
+        'packageId': _currentPkg!.id,
+        'hubDeviceId': widget.device.id,
+        if (appliedCoupon != null) 'couponCode': appliedCoupon,
+      };
+
+      debugPrint('');
+      debugPrint('   ── Calling createOrder ────────────────────────');
+      debugPrint('   Request body → $orderData');
+
+      final result = await ApiService.createOrder(orderData);
+
+      debugPrint('   [ORDER] success      → ${result.success}');
+      debugPrint('   [ORDER] data         → ${result.data}');
+      debugPrint('   [ORDER] errorMessage → ${result.errorMessage}');
+
+      if (!result.success) {
+        throw Exception(
+          result.errorMessage ?? 'Failed to create payment order',
+        );
+      }
+
+      final data = result.data!;
+      final nestedOrder = data['order'] as Map<String, dynamic>?;
+      final sessionData = data['sessionData'] as Map<String, dynamic>?;
+
+      // ✅ FIX: backend createOrder does NOT include couponCode in sessionData.
+      // verifyPayment reads sessionData.couponCode to apply the discount.
+      // So we inject the coupon code here before storing _sessionData,
+      // otherwise the backend charges full price even when coupon is applied.
+      if (sessionData != null && appliedCoupon != null) {
+        _sessionData = Map<String, dynamic>.from(sessionData)
+          ..['couponCode'] = appliedCoupon;
+      } else {
+        _sessionData = sessionData;
+      }
+      debugPrint('');
+      debugPrint('   ── sessionData ────────────────────────────────');
+      debugPrint('   raw sessionData      → $sessionData');
+      debugPrint('   appliedCoupon        → $appliedCoupon');
+      debugPrint('   _sessionData (final) → $_sessionData');
+
+      final String? razorpayOrderId =
+          (data['razorpayOrderId'] ??
+                  data['order_id'] ??
+                  data['orderId'] ??
+                  data['id'] ??
+                  nestedOrder?['razorpayOrderId'] ??
+                  nestedOrder?['order_id'] ??
+                  nestedOrder?['id'] ??
+                  sessionData?['razorpayOrderId'])
+              ?.toString();
+
+      debugPrint('   razorpayOrderId → $razorpayOrderId');
+
+      if (razorpayOrderId == null || razorpayOrderId.isEmpty) {
+        throw Exception('Missing Razorpay order ID in response');
+      }
+
+      _pendingOrderId = razorpayOrderId;
+
+      final dynamic rawAmount =
+          data['amountPaise'] ??
+          data['amount_paise'] ??
+          data['amount'] ??
+          data['totalAmount'] ??
+          data['finalAmount'] ??
+          nestedOrder?['amount'] ??
+          sessionData?['amount'];
+
+      debugPrint('   rawAmount → $rawAmount (${rawAmount.runtimeType})');
+
+      if (rawAmount == null) {
+        throw Exception('Missing amount in order response');
+      }
+
+      final double amountDouble = double.tryParse(rawAmount.toString()) ?? 0.0;
+
+      // ✅ FIX: Use _finalPrice (which already has coupon discount applied)
+      // NOT amountDouble from backend — backend returns full price always.
+      // e.g. package=₹2, coupon=50% → _finalPrice=₹1 → amountPaise=100
+      // Without this fix Razorpay charges ₹2 even when coupon is applied.
+      final double chargeAmount = _finalPrice > 0 ? _finalPrice : amountDouble;
+      final int amountPaise = (chargeAmount * 100).round();
+
+      debugPrint('   amountDouble  → $amountDouble  (backend full price)');
+      debugPrint('   _finalPrice   → $_finalPrice  (after coupon discount)');
+      debugPrint('   chargeAmount  → $chargeAmount  (what Razorpay charges)');
+      debugPrint('   amountPaise   → $amountPaise  (₹${amountPaise / 100})');
+
+      if (amountPaise < 100) {
+        throw Exception('Amount must be at least ₹1');
+      }
+
+      final String keyId =
+          (data['keyId'] ??
+                  data['key'] ??
+                  data['razorpayKeyId'] ??
+                  data['key_id'] ??
+                  nestedOrder?['keyId'] ??
+                  nestedOrder?['key'] ??
+                  nestedOrder?['key_id'])
+              ?.toString() ??
+          _kRazorpayLiveKey;
+
+      debugPrint('   keyId → $keyId');
+
+      if (dialogCtx != null && mounted) {
+        Navigator.pop(dialogCtx!);
+        dialogCtx = null;
+        debugPrint('   Loading dialog dismissed ✅');
+      }
+
+      await Future.delayed(const Duration(milliseconds: 300));
+
+      if (mounted) {
+        setState(() => _isProcessing = false);
+        debugPrint('   [STATE] _isProcessing = false — opening Razorpay');
+        _openRazorpayCheckout(
+          keyId: keyId,
+          orderId: razorpayOrderId,
+          amountPaise: amountPaise,
+        );
+      }
+    } catch (e, stack) {
+      debugPrint('');
+      debugPrint('   ❌ _processPayment EXCEPTION → $e');
+      debugPrint('   Stack → $stack');
+
+      if (dialogCtx != null && mounted) {
+        Navigator.pop(dialogCtx!);
+        debugPrint('   Loading dialog dismissed (error path)');
+      }
+
+      if (mounted) {
+        setState(() => _isProcessing = false);
+        _showErrorDialog(
+          'Payment Failed',
+          e.toString().replaceFirst('Exception: ', ''),
+        );
+      }
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // OPEN RAZORPAY CHECKOUT
+  // ─────────────────────────────────────────────────────────────────────
+
+  void _openRazorpayCheckout({
+    required String keyId,
+    required String orderId,
+    required int amountPaise,
+  }) {
+    debugPrint('');
+    debugPrint('╔══════════════════════════════════════════════════╗');
+    debugPrint('║         OPENING RAZORPAY CHECKOUT                ║');
+    debugPrint('╚══════════════════════════════════════════════════╝');
+    debugPrint('   key         → $keyId');
+    debugPrint('   order_id    → $orderId');
+    debugPrint('   amountPaise → $amountPaise  (₹${amountPaise / 100})');
+    debugPrint('   userName    → $_userName');
+    debugPrint('   userMobile  → $_userMobile');
+
+    try {
+      // ✅ Razorpay live mode requires E.164 format (+91XXXXXXXXXX)
+      final String rawMobile = _userMobile.isNotEmpty
+          ? _userMobile
+          : (widget.hub.mobile ?? '');
+      final String contact = rawMobile.startsWith('+')
+          ? rawMobile
+          : rawMobile.isNotEmpty
+          ? '+91$rawMobile'
+          : '';
+
+      // ✅ Use a clean generic email — constructed fake emails can be flagged
+      final String email = 'user@wash.app';
+
+      final options = {
+        'key': keyId,
+        'amount': amountPaise,
+        'currency': 'INR',
+        'order_id': orderId,
+        'name': widget.hub.hubName,
+        'description': _currentPkg?.packageName ?? 'Wash',
+        'prefill': {'name': _userName, 'contact': contact, 'email': email},
+        'theme': {'color': '#00D4E8'},
+        'timeout': _kPaymentTimeout,
+        'retry': {'enabled': true, 'max_count': 1},
+      };
+
+      debugPrint('   Full options → $options');
+      _razorpay.open(options);
+      debugPrint('   Razorpay.open() called ✅');
+    } catch (e, stack) {
+      debugPrint('   ❌ CRITICAL ERROR opening Razorpay → $e');
+      debugPrint('   Stack → $stack');
+      if (mounted) {
+        setState(() => _isProcessing = false);
+        _showErrorDialog(
+          'Payment Gateway Error',
+          'Could not open payment gateway. Please try again.',
+        );
+      }
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // ERROR DIALOG
+  // ─────────────────────────────────────────────────────────────────────
+
+  void _showErrorDialog(String title, String message) {
+    debugPrint('   [DIALOG] $title → $message');
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: _C.card,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(
+          children: [
+            const Icon(Icons.error_outline, color: Colors.redAccent, size: 24),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                title,
+                style: const TextStyle(color: Colors.white, fontSize: 16),
+              ),
+            ),
+          ],
+        ),
+        content: Text(
+          message,
+          style: const TextStyle(color: Colors.white70, fontSize: 14),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              debugPrint('   [DIALOG] OK pressed');
+              Navigator.pop(context);
+            },
+            child: const Text(
+              'OK',
+              style: TextStyle(color: _C.cyan, fontWeight: FontWeight.w600),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // PACKAGES
   // ─────────────────────────────────────────────────────────────────────
 
   Future<void> _fetchPackages() async {
     debugPrint('');
-    debugPrint('┌──────────────────────────────────────────┐');
-    debugPrint('│  PACKAGES  →  Fetching from API...       │');
-    debugPrint('│  GET /api/user/packages                  │');
-    debugPrint('└──────────────────────────────────────────┘');
-
+    debugPrint('   ── fetchPackages ──────────────────────────────');
     setState(() {
       _pkgLoading = true;
       _pkgError = null;
     });
 
     final result = await ApiService.getHubPackages();
+    debugPrint('   [PACKAGES] success      → ${result.success}');
+    debugPrint('   [PACKAGES] data         → ${result.data}');
+    debugPrint('   [PACKAGES] errorMessage → ${result.errorMessage}');
+
     if (!mounted) return;
 
-    debugPrint('');
-    debugPrint('┌──────────────────────────────────────────┐');
-    debugPrint('│  PACKAGES  →  API Response               │');
-    debugPrint('├──────────────────────────────────────────┤');
-    debugPrint('│  success      → ${result.success}');
-    debugPrint('│  errorMessage → ${result.errorMessage}');
-    debugPrint('│  data keys    → ${result.data?.keys.toList()}');
-    debugPrint('│  full data    → ${result.data}');
-    debugPrint('└──────────────────────────────────────────┘');
-
     if (!result.success) {
-      debugPrint('╔══════════════════════════════════════════╗');
-      debugPrint('║  ❌ PACKAGES  →  API FAILED              ║');
-      debugPrint('║  Error → ${result.errorMessage}');
-      debugPrint('╚══════════════════════════════════════════╝');
       setState(() {
         _pkgError = result.errorMessage ?? 'Failed to load packages.';
         _pkgLoading = false;
       });
+      debugPrint('   [PACKAGES] ❌ $_pkgError');
       return;
     }
 
-    // Try every key the backend might use
-    final dynamic rawPackages =
+    final dynamic raw =
         result.data?['packages'] ??
         result.data?['data'] ??
         result.data?['hubPackages'] ??
@@ -138,64 +678,40 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
         result.data?['results'] ??
         [];
 
-    debugPrint('   [PACKAGES] type  → ${rawPackages.runtimeType}');
-    debugPrint('   [PACKAGES] value → $rawPackages');
+    debugPrint('   [PACKAGES] raw type → ${raw.runtimeType}');
+    debugPrint('   [PACKAGES] raw      → $raw');
 
-    if (rawPackages is! List) {
-      debugPrint('╔══════════════════════════════════════════╗');
-      debugPrint('║  ❌ PACKAGES  →  NOT a List!             ║');
-      debugPrint('║  Got: ${rawPackages.runtimeType}         ║');
-      debugPrint('╚══════════════════════════════════════════╝');
+    if (raw is! List) {
       setState(() {
-        _pkgError = 'Unexpected packages format from server.';
+        _pkgError = 'Unexpected package format from server.';
         _pkgLoading = false;
       });
-      return;
-    }
-
-    if (rawPackages.isEmpty) {
-      debugPrint('   ⚠️  PACKAGES → Empty list returned from server');
-      setState(() {
-        _packages = [];
-        _pkgLoading = false;
-      });
+      debugPrint('   [PACKAGES] ❌ Not a List');
       return;
     }
 
     final list = <HubPackageModel>[];
-    for (int i = 0; i < rawPackages.length; i++) {
+    for (int i = 0; i < raw.length; i++) {
       try {
-        final item = rawPackages[i];
-        debugPrint('   [PACKAGE $i] raw → $item');
-        final pkg = HubPackageModel.fromJson(item as Map<String, dynamic>);
+        final pkg = HubPackageModel.fromJson(raw[i] as Map<String, dynamic>);
         debugPrint(
-          '   [PACKAGE $i] ✅ "${pkg.packageName}"  ₹${pkg.price}  status: ${pkg.statusCode}',
+          '   [PKG $i] id=${pkg.id} | name=${pkg.packageName} | price=₹${pkg.price}',
         );
         list.add(pkg);
       } catch (e) {
-        debugPrint('   [PACKAGE $i] ❌ Parse error → $e');
+        debugPrint('   [PKG $i] ❌ Parse error → $e');
       }
     }
 
-    debugPrint('');
-    debugPrint('   ✅ PACKAGES loaded: ${list.length}');
-    debugPrint('');
-
     setState(() {
-      _packages = list;
+      _packages = list.take(3).toList();
       _pkgLoading = false;
     });
+    debugPrint('   [PACKAGES] ✅ ${_packages.length} packages loaded');
   }
 
-  // ─────────────────────────────────────────────────────────────────────
-  // PULL-TO-REFRESH
-  // ─────────────────────────────────────────────────────────────────────
-
   Future<void> _refreshAll() async {
-    debugPrint('');
-    debugPrint('┌──────────────────────────────────────────┐');
-    debugPrint('│  PULL-TO-REFRESH  →  Triggered           │');
-    debugPrint('└──────────────────────────────────────────┘');
+    debugPrint('   [REFRESH] Pull-to-refresh triggered');
     setState(() {
       _couponCtrl.clear();
       _discountPct = 0;
@@ -204,45 +720,100 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
       _selectedPkg = 0;
     });
     await _fetchPackages();
-    debugPrint('   [REFRESH] ✅ Done');
   }
 
   // ─────────────────────────────────────────────────────────────────────
-  // COUPON
+  // COUPON  ✅ NOW CALLS BACKEND — no more hardcoded demo map
   // ─────────────────────────────────────────────────────────────────────
 
-  void _applyCoupon() {
+  Future<void> _applyCoupon() async {
     final code = _couponCtrl.text.trim().toUpperCase();
-    if (code.isEmpty) return;
-    debugPrint('   [COUPON] Validating → "$code"');
+
+    debugPrint('');
+    debugPrint('╔══════════════════════════════════════════════════╗');
+    debugPrint('║              APPLY COUPON                        ║');
+    debugPrint('╚══════════════════════════════════════════════════╝');
+    debugPrint('   code entered → "$code"');
+
+    if (code.isEmpty) {
+      debugPrint('   ⚠️ Empty code — ignored');
+      return;
+    }
+
     setState(() {
       _couponLoading = true;
       _couponError = null;
     });
 
-    // Replace with real API call when backend supports coupon validation
-    Future.delayed(const Duration(milliseconds: 600), () {
+    try {
+      debugPrint('   Calling ApiService.validateCoupon("$code")...');
+      // ✅ FIX: backend verifyCoupon requires both couponCode AND amount
+      final result = await ApiService.validateCoupon(code, _basePrice);
+
+      debugPrint('   [COUPON] success      → ${result.success}');
+      debugPrint('   [COUPON] data         → ${result.data}');
+      debugPrint('   [COUPON] errorMessage → ${result.errorMessage}');
+
       if (!mounted) return;
-      const demoCoupons = {'WASH10': 10, 'WASH20': 20, 'WELCOME': 15};
-      final pct = demoCoupons[code];
-      debugPrint(
-        pct != null
-            ? '   [COUPON] ✅ Valid — $pct% discount'
-            : '   [COUPON] ❌ Invalid code',
-      );
-      setState(() {
-        _couponLoading = false;
-        if (pct != null) {
+
+      if (result.success) {
+        // Backend returns discount percentage — try common field names
+        final dynamic rawPct =
+            result.data?['discountPercentage'] ??
+            result.data?['discount'] ??
+            result.data?['discountPct'] ??
+            result.data?['discount_percentage'] ??
+            result.data?['coupon']?['discountPercentage'] ??
+            result.data?['coupon']?['discount'];
+
+        debugPrint('   [COUPON] rawPct → $rawPct (${rawPct?.runtimeType})');
+
+        final int pct = rawPct != null
+            ? (double.tryParse(rawPct.toString()) ?? 0.0).toInt()
+            : 0;
+
+        debugPrint('   [COUPON] parsed pct → $pct%');
+
+        if (pct <= 0) {
+          debugPrint('   [COUPON] ⚠️ Success but pct=0 — treating as invalid');
+          setState(() {
+            _couponLoading = false;
+            _discountPct = 0;
+            _couponApplied = false;
+            _couponError = 'Coupon has no discount value.';
+          });
+          return;
+        }
+
+        setState(() {
+          _couponLoading = false;
           _discountPct = pct;
           _couponApplied = true;
           _couponError = null;
-        } else {
+        });
+        debugPrint('   [COUPON] ✅ Applied $pct% discount');
+      } else {
+        final msg = result.errorMessage ?? 'Invalid coupon code.';
+        debugPrint('   [COUPON] ❌ $msg');
+        setState(() {
+          _couponLoading = false;
           _discountPct = 0;
           _couponApplied = false;
-          _couponError = 'Invalid coupon code.';
-        }
-      });
-    });
+          _couponError = msg;
+        });
+      }
+    } catch (e, stack) {
+      debugPrint('   [COUPON] ❌ Exception → $e');
+      debugPrint('   Stack → $stack');
+      if (mounted) {
+        setState(() {
+          _couponLoading = false;
+          _discountPct = 0;
+          _couponApplied = false;
+          _couponError = 'Failed to validate coupon. Try again.';
+        });
+      }
+    }
   }
 
   void _removeCoupon() {
@@ -256,289 +827,29 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
   }
 
   // ─────────────────────────────────────────────────────────────────────
-  // ORDER : CREATE + OPEN RAZORPAY  —  POST /api/user/create-order
-  // ─────────────────────────────────────────────────────────────────────
-
-  Future<void> _onPayAndBook() async {
-    if (_currentPkg == null) return;
-    if (!widget.device.isOnline) {
-      _showSnack(
-        'Device is offline. Please try another device.',
-        isError: true,
-      );
-      return;
-    }
-
-    debugPrint('');
-    debugPrint('┌──────────────────────────────────────────┐');
-    debugPrint('│  ORDER  →  Creating...                   │');
-    debugPrint('├──────────────────────────────────────────┤');
-    debugPrint(
-      '│  Package    → ${_currentPkg!.packageName} (id: ${_currentPkg!.id})',
-    );
-    debugPrint('│  HubDevice  → ${widget.device.id}');
-    debugPrint('│  Amount     → ₹${_finalPrice.toStringAsFixed(2)}');
-    if (_couponApplied)
-      debugPrint('│  Coupon     → ${_couponCtrl.text.trim().toUpperCase()}');
-    debugPrint('└──────────────────────────────────────────┘');
-
-    setState(() => _orderLoading = true);
-
-    final orderData = <String, dynamic>{
-      'packageId': _currentPkg!.id,
-      'hubDeviceId': widget.device.id,
-      if (_couponApplied && _couponCtrl.text.trim().isNotEmpty)
-        'couponCode': _couponCtrl.text.trim().toUpperCase(),
-    };
-
-    final result = await ApiService.createOrder(orderData);
-    if (!mounted) return;
-    setState(() => _orderLoading = false);
-
-    if (!result.success) {
-      debugPrint('   [ORDER] ❌ Failed → ${result.errorMessage}');
-      _showSnack(
-        result.errorMessage ?? 'Order creation failed.',
-        isError: true,
-      );
-      return;
-    }
-
-    // ── Full response dump ────────────────────────────────────────────
-    debugPrint('');
-    debugPrint('┌──────────────────────────────────────────┐');
-    debugPrint('│  ORDER RESPONSE  →  Full data dump       │');
-    debugPrint('├──────────────────────────────────────────┤');
-    debugPrint('│  Top-level keys → ${result.data?.keys.toList()}');
-    debugPrint('│  Full data      → ${result.data}');
-    final nestedOrder = result.data?['order'] as Map<String, dynamic>?;
-    if (nestedOrder != null) {
-      debugPrint('│  order keys     → ${nestedOrder.keys.toList()}');
-      debugPrint('│  order data     → $nestedOrder');
-    }
-    debugPrint('└──────────────────────────────────────────┘');
-    debugPrint('');
-
-    // ── Extract razorpayOrderId ───────────────────────────────────────
-    final String? razorpayOrderId =
-        (result.data?['razorpayOrderId'] ??
-                result.data?['order_id'] ??
-                result.data?['orderId'] ??
-                result.data?['id'] ??
-                nestedOrder?['razorpayOrderId'] ??
-                nestedOrder?['order_id'] ??
-                nestedOrder?['id'])
-            ?.toString();
-
-    debugPrint('   [RAZORPAY] razorpayOrderId → $razorpayOrderId');
-
-    if (razorpayOrderId == null || razorpayOrderId.isEmpty) {
-      debugPrint('   [ORDER] ❌ razorpayOrderId is null');
-      _showSnack('Order error: missing Razorpay order ID.', isError: true);
-      return;
-    }
-
-    // ── Extract amount  (Razorpay needs int paise) ────────────────────
-    final dynamic rawAmount =
-        result.data?['amountPaise'] ??
-        result.data?['amount_paise'] ??
-        result.data?['amount'] ??
-        result.data?['totalAmount'] ??
-        result.data?['finalAmount'] ??
-        result.data?['total'] ??
-        nestedOrder?['amountPaise'] ??
-        nestedOrder?['amount_paise'] ??
-        nestedOrder?['amount'] ??
-        nestedOrder?['totalAmount'] ??
-        nestedOrder?['finalAmount'] ??
-        nestedOrder?['total'];
-
-    debugPrint(
-      '   [RAZORPAY] rawAmount → $rawAmount  (${rawAmount?.runtimeType})',
-    );
-
-    if (rawAmount == null) {
-      debugPrint('   [ORDER] ❌ amount is null');
-      _showSnack('Order error: missing amount.', isError: true);
-      return;
-    }
-
-    // >= 100  → already paise  e.g. 5000
-    // <  100  → rupees × 100  e.g. 50.0 → 5000
-    final double amountDouble = double.tryParse(rawAmount.toString()) ?? 0.0;
-    final int amountPaise = amountDouble >= 100
-        ? amountDouble.round()
-        : (amountDouble * 100).round();
-
-    debugPrint(
-      '   [RAZORPAY] amountDouble=$amountDouble → amountPaise=$amountPaise',
-    );
-
-    // ── Extract Razorpay key ──────────────────────────────────────────
-    final String? keyId =
-        (result.data?['keyId'] ??
-                result.data?['key'] ??
-                result.data?['razorpayKeyId'] ??
-                result.data?['razorpay_key_id'] ??
-                result.data?['key_id'] ??
-                nestedOrder?['keyId'] ??
-                nestedOrder?['key'] ??
-                nestedOrder?['key_id'])
-            ?.toString();
-
-    debugPrint('   [RAZORPAY] keyId → $keyId');
-
-    // ── Open Razorpay checkout ────────────────────────────────────────
-    debugPrint('');
-    debugPrint('┌──────────────────────────────────────────┐');
-    debugPrint('│  RAZORPAY  →  Opening checkout           │');
-    debugPrint('├──────────────────────────────────────────┤');
-    debugPrint('│  order_id → $razorpayOrderId');
-    debugPrint(
-      '│  amount   → $amountPaise paise  (₹${(amountPaise / 100).toStringAsFixed(2)})',
-    );
-    debugPrint('│  key      → $keyId');
-    debugPrint('└──────────────────────────────────────────┘');
-    debugPrint('');
-
-    try {
-      _razorpay.open({
-        'key': keyId ?? '',
-        'amount': amountPaise,
-        'order_id': razorpayOrderId,
-        'name': widget.hub.hubName,
-        'description': _currentPkg!.packageName,
-        'prefill': {
-          'contact': widget.hub.mobile ?? '',
-          'email': widget.hub.email ?? '',
-        },
-        'retry': {'enabled': true, 'max_count': 3},
-        'send_sms_hash': true,
-        'remember_customer': false,
-        'theme': {'color': '#00D4E8'},
-      });
-    } catch (e) {
-      debugPrint('   [RAZORPAY] ❌ open() threw → $e');
-      _showSnack('Could not open payment. $e', isError: true);
-    }
-  }
-
-  // ─────────────────────────────────────────────────────────────────────
-  // RAZORPAY LIFECYCLE
-  // ─────────────────────────────────────────────────────────────────────
-
-  void _initRazorpay() {
-    _razorpay = Razorpay();
-    _razorpay.on(Razorpay.EVENT_PAYMENT_SUCCESS, _onPaymentSuccess);
-    _razorpay.on(Razorpay.EVENT_PAYMENT_ERROR, _onPaymentError);
-    _razorpay.on(Razorpay.EVENT_EXTERNAL_WALLET, _onExternalWallet);
-    debugPrint('   [RAZORPAY] Initialized');
-  }
-
-  // POST /api/user/verify-payment
-  void _onPaymentSuccess(PaymentSuccessResponse response) async {
-    debugPrint('');
-    debugPrint('┌──────────────────────────────────────────┐');
-    debugPrint('│  RAZORPAY  →  PAYMENT SUCCESS ✅         │');
-    debugPrint('├──────────────────────────────────────────┤');
-    debugPrint('│  paymentId → ${response.paymentId}');
-    debugPrint('│  orderId   → ${response.orderId}');
-    debugPrint('│  signature → ${response.signature}');
-    debugPrint('└──────────────────────────────────────────┘');
-
-    final result = await ApiService.verifyPayment({
-      'razorpay_order_id': response.orderId,
-      'razorpay_payment_id': response.paymentId,
-      'razorpay_signature': response.signature,
-    });
-
-    if (!mounted) return;
-
-    debugPrint('   [VERIFY] success → ${result.success}');
-    debugPrint('   [VERIFY] data    → ${result.data}');
-    debugPrint('   [VERIFY] error   → ${result.errorMessage}');
-
-    if (result.success) {
-      debugPrint('   ✅ Verification success — washing started!');
-      _showSnack('Payment successful! Washing started 🚀');
-      // TODO: Navigate to wash-progress screen
-    } else {
-      debugPrint('   ❌ Verification failed → ${result.errorMessage}');
-      _showSnack(
-        result.errorMessage ?? 'Payment verification failed.',
-        isError: true,
-      );
-    }
-  }
-
-  void _onPaymentError(PaymentFailureResponse response) {
-    debugPrint('');
-    debugPrint('╔══════════════════════════════════════════╗');
-    debugPrint('║  RAZORPAY  →  PAYMENT ERROR ❌           ║');
-    debugPrint('╠══════════════════════════════════════════╣');
-    debugPrint('║  code    → ${response.code}');
-    debugPrint('║  message → ${response.message}');
-    debugPrint('╚══════════════════════════════════════════╝');
-
-    String msg;
-    switch (response.code) {
-      case Razorpay.PAYMENT_CANCELLED:
-        msg = 'Payment cancelled.';
-        break;
-      case Razorpay.NETWORK_ERROR:
-        msg = 'Network error. Check your internet and try again.';
-        break;
-      case Razorpay.INVALID_OPTIONS:
-        msg = 'Payment config error. (INVALID_OPTIONS)';
-        debugPrint('   ⚠️  INVALID_OPTIONS — check key or amount format');
-        break;
-      default:
-        msg = response.message ?? 'Payment failed. Please try again.';
-    }
-    _showSnack(msg, isError: true);
-  }
-
-  void _onExternalWallet(ExternalWalletResponse response) {
-    debugPrint('   [RAZORPAY] External wallet → ${response.walletName}');
-    _showSnack('External wallet: ${response.walletName}');
-  }
-
-  // ─────────────────────────────────────────────────────────────────────
-  // HUB CONTACT  —  GET /api/user/hub/:hubId/contact
+  // HUB CONTACT
   // ─────────────────────────────────────────────────────────────────────
 
   Future<void> _callHubOwner() async {
-    debugPrint('   [CONTACT] hub id: ${widget.hub.id}');
+    debugPrint('   [CONTACT] hubId=${widget.hub.id}');
     final result = await ApiService.getHubOwnerContact(
       widget.hub.id.toString(),
     );
+    debugPrint('   [CONTACT] success → ${result.success}');
+    debugPrint('   [CONTACT] data    → ${result.data}');
     if (!mounted) return;
-    if (result.success) {
-      final mobile = result.data?['mobile'] ?? result.data?['contact'];
-      debugPrint('   [CONTACT] ✅ $mobile');
-      _showSnack(
-        mobile != null ? 'Hub contact: $mobile' : 'Contact not available.',
-      );
-    } else {
-      debugPrint('   [CONTACT] ❌ ${result.errorMessage}');
-      _showSnack(
-        result.errorMessage ?? 'Could not fetch contact.',
-        isError: true,
-      );
-    }
-  }
-
-  // ─────────────────────────────────────────────────────────────────────
-  // SNACKBAR
-  // ─────────────────────────────────────────────────────────────────────
-
-  void _showSnack(String msg, {bool isError = false}) {
-    if (!mounted) return;
-    debugPrint('   [SNACKBAR] ${isError ? "❌" : "✅"} "$msg"');
+    final mobile = result.success
+        ? (result.data?['mobile'] ?? result.data?['contact'])
+        : null;
+    debugPrint('   [CONTACT] mobile resolved → $mobile');
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(msg),
-        backgroundColor: isError ? _C.red : _C.cyan,
+        content: Text(
+          mobile != null
+              ? 'Hub contact: $mobile'
+              : (result.errorMessage ?? 'Not available'),
+        ),
+        backgroundColor: result.success ? _C.cyan : _C.red,
         behavior: SnackBarBehavior.floating,
       ),
     );
@@ -572,12 +883,10 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
       ),
       body: Stack(
         children: [
-          // ── Scrollable content + pull-to-refresh ──────────────────────
           RefreshIndicator(
             onRefresh: _refreshAll,
             color: _C.cyan,
             backgroundColor: _C.card,
-            displacement: 50,
             child: SingleChildScrollView(
               physics: const AlwaysScrollableScrollPhysics(),
               padding: EdgeInsets.only(bottom: 110 + bottomPad),
@@ -587,10 +896,8 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const SizedBox(height: 12),
-
                     _buildMachineCard(),
                     const SizedBox(height: 28),
-
                     const Text(
                       'Select Washing Time',
                       style: TextStyle(
@@ -600,13 +907,10 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
                       ),
                     ),
                     const SizedBox(height: 14),
-
                     _buildPackageButtons(),
                     const SizedBox(height: 28),
-
                     _buildCouponField(),
                     const SizedBox(height: 24),
-
                     if (!_pkgLoading && _currentPkg != null)
                       _buildPaymentSummary(),
                   ],
@@ -615,7 +919,7 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
             ),
           ),
 
-          // ── Sticky PAY button ─────────────────────────────────────────
+          // ── Sticky PAY button ─────────────────────────────────────
           Positioned(
             left: 0,
             right: 0,
@@ -627,9 +931,9 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
                 height: 54,
                 child: ElevatedButton(
                   onPressed:
-                      (_orderLoading || _pkgLoading || _currentPkg == null)
+                      (_isProcessing || _pkgLoading || _currentPkg == null)
                       ? null
-                      : _onPayAndBook,
+                      : _processPayment,
                   style: ElevatedButton.styleFrom(
                     backgroundColor: _C.cyan,
                     foregroundColor: Colors.black,
@@ -639,7 +943,7 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
                     ),
                     elevation: 0,
                   ),
-                  child: _orderLoading
+                  child: _isProcessing
                       ? const SizedBox(
                           width: 22,
                           height: 22,
@@ -648,12 +952,12 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
                             strokeWidth: 2.5,
                           ),
                         )
-                      : const Text(
-                          'PAY & BOOK WASHING',
-                          style: TextStyle(
+                      : Text(
+                          'Pay ₹${_finalPrice.toStringAsFixed(0)} & Book',
+                          style: const TextStyle(
                             fontSize: 15,
                             fontWeight: FontWeight.bold,
-                            letterSpacing: 1.2,
+                            letterSpacing: 0.8,
                             color: Colors.black,
                           ),
                         ),
@@ -667,13 +971,12 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
   }
 
   // ─────────────────────────────────────────────────────────────────────
-  // WIDGET : MACHINE CARD
+  // MACHINE CARD
   // ─────────────────────────────────────────────────────────────────────
 
   Widget _buildMachineCard() {
     final d = widget.device;
     final h = widget.hub;
-
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -683,7 +986,6 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Laundry icon box
           Container(
             width: 68,
             height: 68,
@@ -698,8 +1000,6 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
             ),
           ),
           const SizedBox(width: 14),
-
-          // Info column
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -714,8 +1014,6 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
                   ),
                 ),
                 const SizedBox(height: 6),
-
-                // Online / offline badge (outline only, no fill)
                 IntrinsicWidth(
                   child: Container(
                     padding: const EdgeInsets.symmetric(
@@ -740,7 +1038,6 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
                   ),
                 ),
                 const SizedBox(height: 8),
-
                 _infoRow('Device', d.deviceName ?? d.deviceCode, bold: false),
                 _infoRow('Device ID', d.deviceCode, bold: true),
                 _infoRow(
@@ -752,8 +1049,6 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
             ),
           ),
           const SizedBox(width: 8),
-
-          // Phone button
           GestureDetector(
             onTap: _callHubOwner,
             child: Container(
@@ -794,20 +1089,17 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
   }
 
   // ─────────────────────────────────────────────────────────────────────
-  // WIDGET : PACKAGE BUTTONS
-  // Wrap layout — 3 per row, overflows to next row for 4+ packages
+  // PACKAGE BUTTONS
   // ─────────────────────────────────────────────────────────────────────
 
   Widget _buildPackageButtons() {
-    if (_pkgLoading) {
+    if (_pkgLoading)
       return const SizedBox(
         height: 50,
         child: Center(
           child: CircularProgressIndicator(color: _C.cyan, strokeWidth: 2),
         ),
       );
-    }
-
     if (_pkgError != null) {
       return Row(
         children: [
@@ -824,13 +1116,11 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
         ],
       );
     }
-
-    if (_packages.isEmpty) {
+    if (_packages.isEmpty)
       return const Text(
         'No packages available.',
         style: TextStyle(color: Colors.white54, fontSize: 13),
       );
-    }
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -838,47 +1128,50 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
         const double gap = 10;
         final double chipW =
             (constraints.maxWidth - gap * (perRow - 1)) / perRow;
-
-        return Wrap(
-          spacing: gap,
-          runSpacing: gap,
-          children: List.generate(_packages.length, (i) {
-            final pkg = _packages[i];
-            final isSelected = _selectedPkg == i;
-
+        return Row(
+          children: List.generate(3, (i) {
+            final bool hasPackage = i < _packages.length;
+            final bool isSelected = hasPackage && _selectedPkg == i;
             return GestureDetector(
-              onTap: () {
-                debugPrint(
-                  '   [PACKAGE] Selected → "${pkg.packageName}" (₹${pkg.price})',
-                );
-                setState(() {
-                  _selectedPkg = i;
-                  _discountPct = 0;
-                  _couponApplied = false;
-                });
-              },
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 180),
+              onTap: hasPackage
+                  ? () {
+                      debugPrint(
+                        '   [PKG] Selected index=$i → ${_packages[i].packageName}',
+                      );
+                      setState(() {
+                        _selectedPkg = i;
+                        _discountPct = 0;
+                        _couponApplied = false;
+                      });
+                    }
+                  : null,
+              child: Container(
                 width: chipW,
                 height: 50,
+                margin: EdgeInsets.only(right: i < 2 ? gap : 0),
                 decoration: BoxDecoration(
-                  color: isSelected ? Colors.white : Colors.transparent,
+                  color: isSelected
+                      ? Colors.white
+                      : hasPackage
+                      ? Colors.transparent
+                      : Colors.white10,
                   borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: Colors.white, width: 1.5),
+                  border: Border.all(
+                    color: hasPackage ? Colors.white : Colors.white24,
+                    width: 1.5,
+                  ),
                 ),
                 child: Center(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 4),
-                    child: Text(
-                      pkg.packageName,
-                      textAlign: TextAlign.center,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: isSelected ? Colors.black : Colors.white,
-                        fontWeight: FontWeight.w600,
-                        fontSize: 13,
-                      ),
+                  child: Text(
+                    _kTimeLabels[i],
+                    style: TextStyle(
+                      color: isSelected
+                          ? Colors.black
+                          : hasPackage
+                          ? Colors.white
+                          : Colors.white30,
+                      fontWeight: FontWeight.w600,
+                      fontSize: 13,
                     ),
                   ),
                 ),
@@ -891,92 +1184,123 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
   }
 
   // ─────────────────────────────────────────────────────────────────────
-  // WIDGET : COUPON FIELD
+  // COUPON FIELD
   // ─────────────────────────────────────────────────────────────────────
 
   Widget _buildCouponField() {
-    return Container(
-      height: 54,
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(32),
-      ),
-      child: Row(
-        children: [
-          const SizedBox(width: 16),
-          Icon(
-            _couponApplied
-                ? Icons.check_circle_outline
-                : Icons.local_offer_outlined,
-            color: _couponApplied ? Colors.green : Colors.black45,
-            size: 20,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          height: 54,
+          decoration: BoxDecoration(
+            // ✅ FIX: container turns green-tinted when coupon applied
+            // so the user gets clear visual feedback the state changed
+            color: _couponApplied ? Colors.green.shade50 : Colors.white,
+            borderRadius: BorderRadius.circular(32),
+            border: _couponApplied
+                ? Border.all(color: Colors.green.shade300, width: 1.5)
+                : null,
           ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: TextField(
-              controller: _couponCtrl,
-              enabled: !_couponApplied,
-              textCapitalization: TextCapitalization.characters,
-              style: const TextStyle(
-                color: Colors.black87,
-                fontSize: 14,
-                fontWeight: FontWeight.w600,
+          child: Row(
+            children: [
+              const SizedBox(width: 16),
+              Icon(
+                _couponApplied
+                    ? Icons.check_circle
+                    : Icons.local_offer_outlined,
+                // ✅ FIX: solid green check when applied
+                color: _couponApplied ? Colors.green : Colors.black45,
+                size: 20,
               ),
-              decoration: InputDecoration(
-                hintText: _couponApplied
-                    ? '${_couponCtrl.text}  (−$_discountPct%)'
-                    : 'Enter Coupon Code',
-                hintStyle: TextStyle(
-                  color: _couponApplied
-                      ? Colors.green.shade600
-                      : Colors.black38,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w400,
-                ),
-                border: InputBorder.none,
-                isDense: true,
-                contentPadding: EdgeInsets.zero,
-                errorText: _couponError,
-                errorStyle: const TextStyle(fontSize: 11, color: _C.red),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _couponApplied
+                    // ✅ FIX: when applied, show a plain Text widget instead
+                    // of TextField. TextField with enabled:false still shows
+                    // the typed text (not hintText), so the discount % never
+                    // appeared. Plain Text always shows exactly what we want.
+                    ? Text(
+                        '${_couponCtrl.text}  −$_discountPct%',
+                        style: TextStyle(
+                          color: Colors.green.shade700,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      )
+                    : TextField(
+                        controller: _couponCtrl,
+                        textCapitalization: TextCapitalization.characters,
+                        style: const TextStyle(
+                          color: Colors.black87,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                        decoration: InputDecoration(
+                          hintText: 'Enter Coupon Code',
+                          hintStyle: const TextStyle(
+                            color: Colors.black38,
+                            fontSize: 14,
+                          ),
+                          border: InputBorder.none,
+                          isDense: true,
+                          contentPadding: EdgeInsets.zero,
+                          // error shown outside the pill — no errorText here
+                        ),
+                      ),
               ),
-            ),
-          ),
-          if (_couponLoading)
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 16),
-              child: SizedBox(
-                width: 16,
-                height: 16,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  color: Colors.black38,
-                ),
-              ),
-            )
-          else
-            GestureDetector(
-              onTap: _couponApplied ? _removeCoupon : _applyCoupon,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Text(
-                  _couponApplied ? 'Remove' : 'Apply Coupon',
-                  style: TextStyle(
-                    color: _couponApplied
-                        ? Colors.red.shade400
-                        : Colors.black38,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w500,
+              if (_couponLoading)
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 16),
+                  child: SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.black38,
+                    ),
+                  ),
+                )
+              else
+                GestureDetector(
+                  onTap: _couponApplied
+                      ? _removeCoupon
+                      : () {
+                          _applyCoupon();
+                        },
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: Text(
+                      _couponApplied ? 'Remove' : 'Apply Coupon',
+                      style: TextStyle(
+                        color: _couponApplied
+                            ? Colors.red.shade400
+                            : Colors.black38,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
                   ),
                 ),
-              ),
+            ],
+          ),
+        ),
+        // ✅ error text shown OUTSIDE the pill so it doesn't
+        // squash the row height or get clipped
+        if (_couponError != null && !_couponApplied)
+          Padding(
+            padding: const EdgeInsets.only(left: 16, top: 6),
+            child: Text(
+              _couponError!,
+              style: const TextStyle(fontSize: 11, color: _C.red),
             ),
-        ],
-      ),
+          ),
+      ],
     );
   }
 
   // ─────────────────────────────────────────────────────────────────────
-  // WIDGET : PAYMENT SUMMARY
+  // PAYMENT SUMMARY
   // ─────────────────────────────────────────────────────────────────────
 
   Widget _buildPaymentSummary() {

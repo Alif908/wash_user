@@ -137,8 +137,8 @@ class _QrScannerPageState extends State<QrScannerPage> {
   }
 
   // ─────────────────────────────────────────────────────────────────────
-  // STEP 2-5 : PARSE QR  →  CALL API  →  NAVIGATE
-  // Expected QR format:  "hubId|hubDeviceId"   e.g. "3|12"
+  // STEP 2-7 : PARSE QR  →  CALL API  →  NAVIGATE
+  // Expected QR format:  "hubId|hubDeviceId"   e.g. "1|1"
   // ─────────────────────────────────────────────────────────────────────
 
   Future<void> _processValue(String value) async {
@@ -190,6 +190,7 @@ class _QrScannerPageState extends State<QrScannerPage> {
     debugPrint('│  Waiting for server response...          │');
     debugPrint('└──────────────────────────────────────────┘');
 
+    // Always call getHubDeviceDetails — never getDevicesOfHub
     final result = await ApiService.getHubDeviceDetails(hubId, hubDeviceId);
 
     if (!mounted) {
@@ -210,31 +211,88 @@ class _QrScannerPageState extends State<QrScannerPage> {
 
       // ── Extract device & hub JSON ──────────────────────────────────
       //
-      // API response shape:
+      // The backend can return two different shapes:
+      //
+      // SHAPE A — getHubDeviceDetails returns a single hubDevice object:
       // {
       //   "success": true,
       //   "hubDevice": {
-      //     "id": 1, "deviceCode": "DEV001", ...
+      //     "id": 1, "deviceCode": "DEV001", ...,
       //     "hub":    { "id": 1, "hubName": "...", "address": "..." },
       //     "device": { "id": 1, "deviceId": "...", "deviceName": "..." }
       //   }
       // }
       //
-      // So hubDevice IS the device row, and hub/device are nested inside it.
+      // SHAPE B — backend mistakenly returns devices array (hub-level response):
+      // {
+      //   "success": true,
+      //   "hub":     { "id": 1, "hubName": "...", "address": "..." },
+      //   "devices": [
+      //     { "id": 1, "deviceCode": "DEV001", ..., "Device": { ... } }
+      //   ]
+      // }
 
-      // The hubDevice object itself (top-level device row)
-      final hubDeviceJson =
-          (result.data?['hubDevice'] ?? result.data?['device'])
-              as Map<String, dynamic>?;
+      Map<String, dynamic>? hubDeviceJson;
+      Map<String, dynamic>? hubJson;
 
-      // Hub is nested INSIDE hubDevice
-      final hubJson =
-          (hubDeviceJson?['hub'] ?? result.data?['hub'] ?? result.data?['Hub'])
-              as Map<String, dynamic>?;
+      // ── Try SHAPE A first ─────────────────────────────────────────
+      if (result.data?['hubDevice'] != null) {
+        debugPrint('   [SHAPE] Detected SHAPE A → hubDevice object present');
 
-      // For HubDeviceModel we pass the whole hubDevice object
-      // (it already contains nested hub + device sub-objects)
-      final deviceJson = hubDeviceJson;
+        hubDeviceJson = result.data!['hubDevice'] as Map<String, dynamic>?;
+
+        // Hub is nested inside hubDevice in shape A
+        hubJson =
+            (hubDeviceJson?['hub'] ??
+                    result.data?['hub'] ??
+                    result.data?['Hub'])
+                as Map<String, dynamic>?;
+      }
+      // ── Fallback: SHAPE B — devices array ────────────────────────
+      else if (result.data?['devices'] != null) {
+        debugPrint('   [SHAPE] Detected SHAPE B → devices array present');
+        debugPrint(
+          '   [SHAPE] Searching for hubDeviceId="$hubDeviceId" in list...',
+        );
+
+        hubJson = result.data?['hub'] as Map<String, dynamic>?;
+
+        final devicesList = result.data?['devices'] as List<dynamic>?;
+
+        debugPrint(
+          '   [SHAPE] devices list IDs → ${devicesList?.map((d) => d['id'].toString()).toList()}',
+        );
+
+        // Match by hub device row id
+        hubDeviceJson =
+            devicesList?.firstWhere(
+                  (d) => d['id'].toString() == hubDeviceId,
+                  orElse: () => null,
+                )
+                as Map<String, dynamic>?;
+
+        // Fallback: match by deviceCode in case QR encodes that instead
+        if (hubDeviceJson == null) {
+          debugPrint(
+            '   [SHAPE] id match failed — trying deviceCode match for "$hubDeviceId"',
+          );
+          hubDeviceJson =
+              devicesList?.firstWhere(
+                    (d) =>
+                        d['deviceCode']?.toString().toLowerCase() ==
+                        hubDeviceId.toLowerCase(),
+                    orElse: () => null,
+                  )
+                  as Map<String, dynamic>?;
+        }
+
+        // Shape B uses capital "Device" key for the nested device info.
+        // Normalise to lowercase "device" so HubDeviceModel.fromJson works.
+        if (hubDeviceJson != null && hubDeviceJson['Device'] != null) {
+          hubDeviceJson = Map<String, dynamic>.from(hubDeviceJson);
+          hubDeviceJson['device'] = hubDeviceJson['Device'];
+        }
+      }
 
       debugPrint('┌──────────────────────────────────────────┐');
       debugPrint('│  STEP 6 : EXTRACTING DEVICE & HUB DATA  │');
@@ -245,8 +303,8 @@ class _QrScannerPageState extends State<QrScannerPage> {
       debugPrint('');
 
       // ── Parse into models ──────────────────────────────────────────
-      final device = deviceJson != null
-          ? HubDeviceModel.fromJson(deviceJson)
+      final device = hubDeviceJson != null
+          ? HubDeviceModel.fromJson(hubDeviceJson)
           : null;
       final hub = hubJson != null ? HubModel.fromJson(hubJson) : null;
 
