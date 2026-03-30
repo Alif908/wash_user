@@ -132,7 +132,7 @@ class _OtpPageState extends State<OtpPage> with SingleTickerProviderStateMixin {
     if (result.success) {
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(builder: (_) => Home()),
+        MaterialPageRoute(builder: (_) => Homepage()),
       );
     } else {
       // Clear OTP boxes on failure so user can re-enter

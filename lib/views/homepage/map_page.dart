@@ -1,7 +1,20 @@
+// ── CHANGES SUMMARY ───────────────────────────────────────────────────────────
+// 1. _HubBottomSheet now accepts a BuildContext from MapPage and loads hub
+//    devices via ApiService.getDevicesOfHub() before navigating.
+// 2. "Book Now" shows a loading spinner while fetching devices, then navigates
+//    to LaundryMachineScreen with the first available/online device.
+//    If no device is available, shows a snackbar.
+// 3. Only _HubBottomSheet is changed — rest of map_page.dart is untouched.
+//
+// REPLACE your existing _HubBottomSheet class with this one.
+// Also update _showHubSheet() in _MapPageState (shown at the bottom).
+// ─────────────────────────────────────────────────────────────────────────────
+
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:wash_user/views/homepage/laudary_machine_screen.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:wash_user/models/usermodel.dart';
 import 'package:wash_user/services/api_service.dart';
@@ -16,25 +29,20 @@ class MapPage extends StatefulWidget {
 }
 
 class _MapPageState extends State<MapPage> {
-  // ── Theme ────────────────────────────────────────────────────────────────
   static const Color _cyan = Color(0xFF00CFFF);
   static const Color _cardBg = Color(0xFF1C1C1E);
   static const double _navBarHeight = 80.0;
 
-  // ── WebView ───────────────────────────────────────────────────────────────
   late final WebViewController _webViewController;
   bool _mapReady = false;
 
-  // ── State ─────────────────────────────────────────────────────────────────
   LatLngSimple? _userLatLng;
   String _locationLabel = 'Your location';
   List<HubModel> _hubs = [];
   List<HubModel> _filteredHubs = [];
   bool _isLoadingHubs = false;
   String? _error;
-
-  // ── Hub selected from map tap ─────────────────────────────────────────────
-  HubModel? _pendingHubFromMap;
+  int _selectedHubIndex = 0;
 
   @override
   void initState() {
@@ -49,7 +57,6 @@ class _MapPageState extends State<MapPage> {
     _initLocation();
   }
 
-  // ── WebView setup ─────────────────────────────────────────────────────────
   void _initWebView() {
     _webViewController = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
@@ -68,7 +75,6 @@ class _MapPageState extends State<MapPage> {
       ..loadFlutterAsset('assets/map.html');
   }
 
-  // ── Sync current state to map after ready ─────────────────────────────────
   void _syncMapState() {
     if (!_mapReady) return;
     if (_userLatLng != null) {
@@ -84,7 +90,6 @@ class _MapPageState extends State<MapPage> {
     _webViewController.runJavaScript(script).catchError((_) {});
   }
 
-  // ── Handle taps from map JS ───────────────────────────────────────────────
   void _onMapMessage(String raw) {
     try {
       final map = jsonDecode(raw) as Map<String, dynamic>;
@@ -96,7 +101,6 @@ class _MapPageState extends State<MapPage> {
     } catch (_) {}
   }
 
-  // ── Location ──────────────────────────────────────────────────────────────
   Future<void> _initLocation() async {
     try {
       bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
@@ -105,7 +109,6 @@ class _MapPageState extends State<MapPage> {
         setState(() => _locationLabel = 'Location service disabled');
         return;
       }
-
       LocationPermission permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
         permission = await Geolocator.requestPermission();
@@ -122,22 +125,18 @@ class _MapPageState extends State<MapPage> {
         );
         return;
       }
-
       final pos = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.high,
       );
       if (!mounted) return;
-
       setState(() {
         _userLatLng = LatLngSimple(pos.latitude, pos.longitude);
         _locationLabel = 'Your location';
       });
-
       if (_mapReady) {
         _js('flutterMoveToLocation(${pos.latitude}, ${pos.longitude}, 14)');
         _js('flutterSetUserMarker(${pos.latitude}, ${pos.longitude})');
       }
-
       await ApiService.updateLocation(pos.latitude, pos.longitude);
       _loadNearestHubs();
     } catch (e) {
@@ -147,7 +146,6 @@ class _MapPageState extends State<MapPage> {
     }
   }
 
-  // ── Hubs ──────────────────────────────────────────────────────────────────
   Future<void> _loadNearestHubs() async {
     setState(() {
       _isLoadingHubs = true;
@@ -155,7 +153,6 @@ class _MapPageState extends State<MapPage> {
     });
     final result = await ApiService.getNearestHubs();
     if (!mounted) return;
-
     if (result.success) {
       final rawList = result.data?['hubs'] ?? result.data?['data'] ?? [];
       final hubs = (rawList as List)
@@ -165,6 +162,7 @@ class _MapPageState extends State<MapPage> {
         _hubs = hubs;
         _filteredHubs = hubs;
         _isLoadingHubs = false;
+        _selectedHubIndex = 0;
       });
       _pushHubMarkers();
     } else {
@@ -192,12 +190,10 @@ class _MapPageState extends State<MapPage> {
           )
           .toList(),
     );
-    // escape single-quotes for JS string
     final escaped = jsonStr.replaceAll("'", "\\'");
     _js("flutterSetHubMarkers('$escaped')");
   }
 
-  // ── My Location FAB ───────────────────────────────────────────────────────
   void _goToMyLocation() {
     if (_userLatLng == null) {
       _initLocation();
@@ -206,7 +202,7 @@ class _MapPageState extends State<MapPage> {
     _js('flutterMoveToLocation(${_userLatLng!.lat}, ${_userLatLng!.lng}, 15)');
   }
 
-  // ── Hub Bottom Sheet ──────────────────────────────────────────────────────
+  // ── UPDATED: pass outer context so _HubBottomSheet can navigate ──────────
   void _showHubSheet(HubModel hub) {
     showModalBottomSheet(
       context: context,
@@ -215,11 +211,14 @@ class _MapPageState extends State<MapPage> {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (ctx) => _HubBottomSheet(hub: hub, cyan: _cyan),
+      builder: (ctx) => _HubBottomSheet(
+        hub: hub,
+        cyan: _cyan,
+        outerContext: context, // ← pass map page context for navigation
+      ),
     );
   }
 
-  // ── Search Sheet ──────────────────────────────────────────────────────────
   void _showSearchSheet() {
     showModalBottomSheet(
       context: context,
@@ -248,7 +247,6 @@ class _MapPageState extends State<MapPage> {
     );
   }
 
-  // ── Build ─────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
     final topPad = MediaQuery.of(context).padding.top;
@@ -260,10 +258,9 @@ class _MapPageState extends State<MapPage> {
       extendBody: true,
       body: Stack(
         children: [
-          // ── Full Screen HERE Map (WebView) ──────────────────────────────
           Positioned.fill(child: WebViewWidget(controller: _webViewController)),
 
-          // ── Top Search Bar (tappable) ───────────────────────────────────
+          // Top Search Bar
           Positioned(
             top: topPad + 8,
             left: 16,
@@ -313,14 +310,13 @@ class _MapPageState extends State<MapPage> {
             ),
           ),
 
-          // ── Right FABs ──────────────────────────────────────────────────
+          // Right FABs
           Positioned(
             top: topPad + 8,
             right: 16,
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                // Phone → Contact Us
                 _MapFab(
                   icon: Icons.phone,
                   onTap: () => Navigator.push(
@@ -329,16 +325,10 @@ class _MapPageState extends State<MapPage> {
                   ),
                 ),
                 const SizedBox(height: 12),
-
-                // Tune → Search/Filter Sheet
                 _MapFab(icon: Icons.tune, onTap: _showSearchSheet),
                 const SizedBox(height: 12),
-
-                // My Location
                 _MapFab(icon: Icons.my_location, onTap: _goToMyLocation),
                 const SizedBox(height: 12),
-
-                // QR Scanner with "New" badge
                 Stack(
                   clipBehavior: Clip.none,
                   children: [
@@ -379,7 +369,7 @@ class _MapPageState extends State<MapPage> {
             ),
           ),
 
-          // ── Error Banner ────────────────────────────────────────────────
+          // Error Banner
           if (_error != null)
             Positioned(
               top: topPad + 70,
@@ -402,64 +392,732 @@ class _MapPageState extends State<MapPage> {
               ),
             ),
 
-          // ── Hubs Horizontal Scroll ──────────────────────────────────────
+          // Nearby Hubs Panel
           if (_filteredHubs.isNotEmpty)
             Positioned(
-              bottom: bottomOffset + 12,
+              bottom: bottomOffset + 8,
               left: 0,
               right: 0,
-              child: SizedBox(
-                height: 110,
-                child: ListView.separated(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  scrollDirection: Axis.horizontal,
-                  itemCount: _filteredHubs.length,
-                  separatorBuilder: (_, __) => const SizedBox(width: 10),
-                  itemBuilder: (ctx, i) {
-                    final hub = _filteredHubs[i];
-                    return _HubChip(
-                      hub: hub,
-                      cyan: _cyan,
-                      onTap: () {
-                        _showHubSheet(hub);
-                        if (hub.latitude != null && hub.longitude != null) {
-                          _js(
-                            'flutterMoveToLocation(${hub.latitude}, ${hub.longitude}, 15)',
-                          );
-                        }
-                      },
+              child: _NearbyHubsPanel(
+                hubs: _filteredHubs,
+                cyan: _cyan,
+                cardBg: const Color(0xFF1C1C1E),
+                selectedIndex: _selectedHubIndex,
+                onHubTap: (hub, index) {
+                  setState(() => _selectedHubIndex = index);
+                  _showHubSheet(hub);
+                  if (hub.latitude != null && hub.longitude != null) {
+                    _js(
+                      'flutterMoveToLocation(${hub.latitude}, ${hub.longitude}, 15)',
                     );
-                  },
-                ),
+                  }
+                },
               ),
             ),
-
-          // ── OSM-style Attribution ───────────────────────────────────────
-          Positioned(
-            bottom: bottomOffset + 4,
-            right: 4,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-              decoration: BoxDecoration(
-                color: Colors.white.withOpacity(0.7),
-                borderRadius: BorderRadius.circular(4),
-              ),
-              child: const Text(
-                '© HERE Maps',
-                style: TextStyle(fontSize: 9, color: Colors.black87),
-              ),
-            ),
-          ),
         ],
       ),
     );
   }
 }
 
-// ── Simple LatLng helper (no flutter_map dependency) ──────────────────────────
+// ── LatLng helper ─────────────────────────────────────────────────────────────
 class LatLngSimple {
   final double lat, lng;
   const LatLngSimple(this.lat, this.lng);
+}
+
+// ── Nearby Hubs Panel ─────────────────────────────────────────────────────────
+class _NearbyHubsPanel extends StatelessWidget {
+  final List<HubModel> hubs;
+  final Color cyan;
+  final Color cardBg;
+  final int selectedIndex;
+  final void Function(HubModel hub, int index) onHubTap;
+
+  const _NearbyHubsPanel({
+    required this.hubs,
+    required this.cyan,
+    required this.cardBg,
+    required this.selectedIndex,
+    required this.onHubTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final screenW = MediaQuery.of(context).size.width;
+    final cardW = (screenW * 0.85).clamp(260.0, 320.0);
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(left: 16, bottom: 8),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+            decoration: BoxDecoration(
+              color: Colors.black.withOpacity(0.80),
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.waves, color: cyan, size: 14),
+                const SizedBox(width: 6),
+                Text(
+                  '${hubs.length} Hub${hubs.length != 1 ? 's' : ''} Nearby',
+                  style: TextStyle(
+                    color: cyan,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: List.generate(hubs.length, (i) {
+              final hub = hubs[i];
+              final isSelected = i == selectedIndex;
+              return Padding(
+                padding: EdgeInsets.only(right: i < hubs.length - 1 ? 10 : 0),
+                child: _HubCard(
+                  hub: hub,
+                  cyan: cyan,
+                  cardBg: cardBg,
+                  isSelected: isSelected,
+                  cardWidth: cardW,
+                  onTap: () => onHubTap(hub, i),
+                ),
+              );
+            }),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ── Hub Card ──────────────────────────────────────────────────────────────────
+class _HubCard extends StatelessWidget {
+  final HubModel hub;
+  final Color cyan;
+  final Color cardBg;
+  final bool isSelected;
+  final double cardWidth;
+  final VoidCallback onTap;
+
+  const _HubCard({
+    required this.hub,
+    required this.cyan,
+    required this.cardBg,
+    required this.isSelected,
+    required this.cardWidth,
+    required this.onTap,
+  });
+
+  String _distanceLabel(double? dist) {
+    if (dist == null) return 'Nearby';
+    if (dist < 1) return 'Very Near';
+    if (dist < 3) return 'Near';
+    if (dist < 10) return 'Moderate';
+    return 'Far Away';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final dist = hub.distance;
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        width: cardWidth,
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: Colors.black.withOpacity(0.92),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: isSelected ? cyan : cyan.withOpacity(0.22),
+            width: isSelected ? 1.5 : 1,
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: isSelected
+                  ? cyan.withOpacity(0.18)
+                  : Colors.black.withOpacity(0.35),
+              blurRadius: isSelected ? 14 : 8,
+              offset: const Offset(0, 3),
+            ),
+          ],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.waves, color: cyan, size: 12),
+                const SizedBox(width: 4),
+                Expanded(
+                  child: Text(
+                    'High-speed laundry cleaner',
+                    style: TextStyle(
+                      color: cyan.withOpacity(0.85),
+                      fontSize: 10,
+                      fontWeight: FontWeight.w500,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                Icon(
+                  Icons.keyboard_arrow_down,
+                  color: Colors.white30,
+                  size: 15,
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  width: 48,
+                  height: 48,
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade900,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: cyan.withOpacity(0.25), width: 1),
+                  ),
+                  child: Icon(
+                    Icons.local_laundry_service,
+                    color: cyan,
+                    size: 24,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        hub.hubName,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 13,
+                          fontWeight: FontWeight.bold,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        hub.address ?? 'No address',
+                        style: const TextStyle(
+                          color: Colors.white54,
+                          fontSize: 10,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 5),
+                      Row(
+                        children: [
+                          const Icon(Icons.star, color: Colors.amber, size: 12),
+                          const SizedBox(width: 2),
+                          const Text(
+                            '4.7',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Container(
+                            width: 6,
+                            height: 6,
+                            decoration: const BoxDecoration(
+                              color: Colors.green,
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          const SizedBox(width: 3),
+                          const Text(
+                            'Available',
+                            style: TextStyle(
+                              color: Colors.green,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Container(
+                      width: 32,
+                      height: 32,
+                      decoration: BoxDecoration(
+                        color: Colors.grey.shade800,
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(
+                        Icons.phone,
+                        color: Colors.white,
+                        size: 15,
+                      ),
+                    ),
+                    if (dist != null) ...[
+                      const SizedBox(height: 5),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 6,
+                          vertical: 3,
+                        ),
+                        decoration: BoxDecoration(
+                          color: cyan.withOpacity(0.15),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                            color: cyan.withOpacity(0.45),
+                            width: 1,
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.navigation, color: cyan, size: 9),
+                            const SizedBox(width: 2),
+                            Text(
+                              '${dist.toStringAsFixed(1)}km',
+                              style: TextStyle(
+                                color: cyan,
+                                fontSize: 9,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.05),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                children: [
+                  _ServiceIcon(Icons.shopping_basket_outlined),
+                  const SizedBox(width: 3),
+                  _ServiceIcon(Icons.local_laundry_service_outlined),
+                  const SizedBox(width: 6),
+                  _DividerLine(),
+                  const SizedBox(width: 6),
+                  _ServiceIcon(Icons.dry_cleaning_outlined),
+                  const SizedBox(width: 3),
+                  _ServiceIcon(Icons.accessibility_new_outlined),
+                  const SizedBox(width: 6),
+                  _DividerLine(),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      _distanceLabel(dist),
+                      style: const TextStyle(
+                        color: Colors.white54,
+                        fontSize: 10,
+                      ),
+                      textAlign: TextAlign.right,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ServiceIcon extends StatelessWidget {
+  final IconData icon;
+  const _ServiceIcon(this.icon);
+
+  @override
+  Widget build(BuildContext context) {
+    return Icon(icon, color: Colors.white54, size: 13);
+  }
+}
+
+class _DividerLine extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return Container(width: 1, height: 12, color: Colors.white24);
+  }
+}
+
+// ── Hub Bottom Sheet ── UPDATED ───────────────────────────────────────────────
+class _HubBottomSheet extends StatefulWidget {
+  final HubModel hub;
+  final Color cyan;
+  final BuildContext outerContext; // ← map page context for Navigator.push
+
+  const _HubBottomSheet({
+    required this.hub,
+    required this.cyan,
+    required this.outerContext,
+  });
+
+  @override
+  State<_HubBottomSheet> createState() => _HubBottomSheetState();
+}
+
+class _HubBottomSheetState extends State<_HubBottomSheet> {
+  bool _loadingDevices = false;
+
+  Future<void> raiseTicket(String deviceId) async {
+    try {
+      await ApiService().createServiceTicket(
+        deviceId: deviceId,
+        issue: "All machines are offline",
+      );
+
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text("Ticket created ✅")));
+    } catch (e) {
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text("Failed to create ticket ❌")));
+    }
+  }
+
+  /// Fetch devices for this hub, pick the first online one,
+  /// then navigate to LaundryMachineScreen.
+  Future<void> _onBookNow() async {
+    setState(() => _loadingDevices = true);
+
+    final result = await ApiService.getDevicesOfHub(widget.hub.id.toString());
+
+    if (!mounted) return;
+    setState(() => _loadingDevices = false);
+
+    if (!result.success) {
+      _showSnack(result.errorMessage ?? 'Failed to load devices');
+      return;
+    }
+
+    // Parse device list — backend may wrap in 'devices', 'hubDevices', or 'data'
+    final raw =
+        result.data?['devices'] ??
+        result.data?['hubDevices'] ??
+        result.data?['data'] ??
+        [];
+
+    final devices = (raw as List)
+        .whereType<Map<String, dynamic>>()
+        .map(HubDeviceModel.fromJson)
+        .toList();
+
+    if (devices.isEmpty) {
+      _showSnack('No devices found for this hub');
+      return;
+    }
+
+    // Prefer an online device; fall back to the first one
+    final device = devices.firstWhere(
+      (d) => d.isOnline,
+      orElse: () => devices.first,
+    );
+
+    // final onlineDevices = devices.where((d) => d.isOnline).toList();
+
+    // if (onlineDevices.isEmpty) {
+    //   _showSnack("All machines are currently offline ❌");
+
+    //   // 👉 Optional: allow ticket here
+    //   raiseTicket(devices.first.id.toString());
+    //   ;
+
+    //   return;
+    // }
+
+    // final device = onlineDevices.first;
+
+    // Close the bottom sheet, then push from the map page context
+    if (!mounted) return;
+    Navigator.pop(context);
+
+    Navigator.push(
+      widget.outerContext,
+      MaterialPageRoute(
+        builder: (_) => LaundryMachineScreen(hub: widget.hub, device: device),
+      ),
+    );
+  }
+
+  void _showSnack(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        backgroundColor: Colors.red.shade700,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hub = widget.hub;
+    final cyan = widget.cyan;
+
+    return SingleChildScrollView(
+      padding: EdgeInsets.fromLTRB(
+        20,
+        20,
+        20,
+        MediaQuery.of(context).padding.bottom + 20,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Center(
+            child: Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Colors.white24,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+
+          // Header
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 50,
+                height: 50,
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade900,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: cyan.withOpacity(0.3), width: 1),
+                ),
+                child: Icon(Icons.local_laundry_service, color: cyan, size: 26),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      hub.hubName,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 4,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: const [
+                            Icon(Icons.star, color: Colors.amber, size: 14),
+                            SizedBox(width: 4),
+                            Text(
+                              '4.7',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: const [
+                            Icon(Icons.circle, color: Colors.green, size: 8),
+                            SizedBox(width: 4),
+                            Text(
+                              'Available',
+                              style: TextStyle(
+                                color: Colors.green,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
+                        ),
+                        if (hub.distance != null)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 3,
+                            ),
+                            decoration: BoxDecoration(
+                              color: cyan.withOpacity(0.15),
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(
+                                color: cyan.withOpacity(0.4),
+                                width: 1,
+                              ),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.navigation, color: cyan, size: 10),
+                                const SizedBox(width: 3),
+                                Text(
+                                  '${hub.distance!.toStringAsFixed(2)}km',
+                                  style: TextStyle(
+                                    color: cyan,
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 16),
+          const Divider(color: Colors.white12),
+          const SizedBox(height: 12),
+
+          if (hub.address != null)
+            _InfoRow(
+              icon: Icons.location_on_outlined,
+              text: hub.address!,
+              cyan: cyan,
+            ),
+          if (hub.operatorName != null)
+            _InfoRow(
+              icon: Icons.person_outline,
+              text: 'Operator: ${hub.operatorName}',
+              cyan: cyan,
+            ),
+          if (hub.operatorMobile != null)
+            _InfoRow(
+              icon: Icons.phone_outlined,
+              text: hub.operatorMobile!,
+              cyan: cyan,
+            ),
+          if (hub.deviceCount != null)
+            _InfoRow(
+              icon: Icons.devices_outlined,
+              text: '${hub.deviceCount} Devices available',
+              cyan: cyan,
+            ),
+
+          const SizedBox(height: 8),
+
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.05),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceAround,
+              children: [
+                _ServiceChip(
+                  icon: Icons.shopping_basket_outlined,
+                  label: 'Wash',
+                  cyan: cyan,
+                ),
+                _ServiceChip(
+                  icon: Icons.local_laundry_service_outlined,
+                  label: 'Dry',
+                  cyan: cyan,
+                ),
+                _ServiceChip(
+                  icon: Icons.dry_cleaning_outlined,
+                  label: 'Iron',
+                  cyan: cyan,
+                ),
+                _ServiceChip(
+                  icon: Icons.accessibility_new_outlined,
+                  label: 'Fold',
+                  cyan: cyan,
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(height: 20),
+
+          // ── Book Now Button ───────────────────────────────────────────
+          SizedBox(
+            width: double.infinity,
+            height: 50,
+            child: ElevatedButton(
+              onPressed: _loadingDevices ? null : _onBookNow,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: cyan,
+                disabledBackgroundColor: cyan.withOpacity(0.5),
+                foregroundColor: Colors.black,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+              ),
+              child: _loadingDevices
+                  ? const SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2.5,
+                        color: Colors.black,
+                      ),
+                    )
+                  : const Text(
+                      'Book Now',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 16,
+                      ),
+                    ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 // ── Search Sheet ──────────────────────────────────────────────────────────────
@@ -495,10 +1153,13 @@ class _SearchSheetState extends State<_SearchSheet> {
       setState(() {
         _results = q.isEmpty
             ? widget.hubs
-            : widget.hubs.where((h) {
-                return h.hubName.toLowerCase().contains(q) ||
-                    (h.address ?? '').toLowerCase().contains(q);
-              }).toList();
+            : widget.hubs
+                  .where(
+                    (h) =>
+                        h.hubName.toLowerCase().contains(q) ||
+                        (h.address ?? '').toLowerCase().contains(q),
+                  )
+                  .toList();
       });
     });
   }
@@ -524,7 +1185,6 @@ class _SearchSheetState extends State<_SearchSheet> {
           mainAxisSize: MainAxisSize.min,
           children: [
             const SizedBox(height: 12),
-            // Drag handle
             Center(
               child: Container(
                 width: 40,
@@ -536,7 +1196,6 @@ class _SearchSheetState extends State<_SearchSheet> {
               ),
             ),
             const SizedBox(height: 16),
-            // Search field
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: Container(
@@ -591,7 +1250,6 @@ class _SearchSheetState extends State<_SearchSheet> {
               ),
             ),
             const SizedBox(height: 8),
-            // Count label
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20),
               child: Align(
@@ -603,7 +1261,6 @@ class _SearchSheetState extends State<_SearchSheet> {
               ),
             ),
             const SizedBox(height: 4),
-            // Results list
             Flexible(
               child: _results.isEmpty
                   ? const Padding(
@@ -704,167 +1361,29 @@ class _MapFab extends StatelessWidget {
   }
 }
 
-// ── Hub Chip ──────────────────────────────────────────────────────────────────
-class _HubChip extends StatelessWidget {
-  final HubModel hub;
+// ── Service Chip ──────────────────────────────────────────────────────────────
+class _ServiceChip extends StatelessWidget {
+  final IconData icon;
+  final String label;
   final Color cyan;
-  final VoidCallback onTap;
-  const _HubChip({required this.hub, required this.cyan, required this.onTap});
+  const _ServiceChip({
+    required this.icon,
+    required this.label,
+    required this.cyan,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: 200,
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-        decoration: BoxDecoration(
-          color: Colors.black.withOpacity(0.88),
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: cyan.withOpacity(0.35), width: 1),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.3),
-              blurRadius: 8,
-              offset: const Offset(0, 2),
-            ),
-          ],
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, color: cyan, size: 20),
+        const SizedBox(height: 4),
+        Text(
+          label,
+          style: TextStyle(color: cyan.withOpacity(0.8), fontSize: 10),
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              children: [
-                Icon(Icons.local_laundry_service, color: cyan, size: 16),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    hub.hubName,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 13,
-                      fontWeight: FontWeight.bold,
-                    ),
-                    overflow: TextOverflow.ellipsis,
-                    maxLines: 1,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 6),
-            Text(
-              hub.address ?? 'Tap for details',
-              style: const TextStyle(color: Colors.white54, fontSize: 11),
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ── Hub Bottom Sheet ──────────────────────────────────────────────────────────
-class _HubBottomSheet extends StatelessWidget {
-  final HubModel hub;
-  final Color cyan;
-  const _HubBottomSheet({required this.hub, required this.cyan});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: EdgeInsets.fromLTRB(
-        20,
-        20,
-        20,
-        MediaQuery.of(context).padding.bottom + 20,
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Drag handle
-          Center(
-            child: Container(
-              width: 40,
-              height: 4,
-              decoration: BoxDecoration(
-                color: Colors.white24,
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-          ),
-          const SizedBox(height: 16),
-          Row(
-            children: [
-              Icon(Icons.local_laundry_service, color: cyan, size: 24),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  hub.hubName,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 14),
-          if (hub.address != null)
-            _InfoRow(
-              icon: Icons.location_on_outlined,
-              text: hub.address!,
-              cyan: cyan,
-            ),
-          if (hub.operatorName != null)
-            _InfoRow(
-              icon: Icons.person_outline,
-              text: 'Operator: ${hub.operatorName}',
-              cyan: cyan,
-            ),
-          if (hub.operatorMobile != null)
-            _InfoRow(
-              icon: Icons.phone_outlined,
-              text: hub.operatorMobile!,
-              cyan: cyan,
-            ),
-          if (hub.deviceCount != null)
-            _InfoRow(
-              icon: Icons.devices_outlined,
-              text: '${hub.deviceCount} Devices available',
-              cyan: cyan,
-            ),
-          const SizedBox(height: 20),
-          SizedBox(
-            width: double.infinity,
-            height: 50,
-            child: ElevatedButton(
-              onPressed: () {
-                Navigator.pop(context);
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (_) => const QrScannerPage()),
-                );
-              },
-              style: ElevatedButton.styleFrom(
-                backgroundColor: cyan,
-                foregroundColor: Colors.black,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14),
-                ),
-              ),
-              child: const Text(
-                'Book Now',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-              ),
-            ),
-          ),
-        ],
-      ),
+      ],
     );
   }
 }

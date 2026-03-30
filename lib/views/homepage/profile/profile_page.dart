@@ -188,7 +188,7 @@ class _ProfilePageState extends State<ProfilePage> {
                     label: 'Washing Status',
                     onTap: () => Navigator.push(
                       context,
-                      MaterialPageRoute(builder: (_) => const WashingStatus()),
+                      MaterialPageRoute(builder: (_) => WashingStatus()),
                     ),
                   ),
                   const SizedBox(height: 12),

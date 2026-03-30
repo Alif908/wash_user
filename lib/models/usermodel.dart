@@ -84,7 +84,7 @@ class UserModel {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// HUB MODEL
+// HUB MODEL  ✅ Added: distance field
 // ─────────────────────────────────────────────────────────────────────
 class HubModel {
   final int id;
@@ -103,6 +103,7 @@ class HubModel {
   final int? deviceCount;
   final String? operatorName;
   final String? operatorMobile;
+  final double? distance; // ✅ NEW — distance in km from user's location
 
   const HubModel({
     required this.id,
@@ -121,6 +122,7 @@ class HubModel {
     this.deviceCount,
     this.operatorName,
     this.operatorMobile,
+    this.distance, // ✅ NEW
   });
 
   factory HubModel.fromJson(Map<String, dynamic> json) => HubModel(
@@ -144,6 +146,12 @@ class HubModel {
     deviceCount: _safeInt(json['deviceCount']),
     operatorName: json['operatorName']?.toString(),
     operatorMobile: json['operatorMobile']?.toString(),
+    // ✅ NEW — backend may return 'distance' or 'distanceKm'
+    distance: json['distance'] != null
+        ? double.tryParse(json['distance'].toString())
+        : json['distanceKm'] != null
+        ? double.tryParse(json['distanceKm'].toString())
+        : null,
   );
 
   Map<String, dynamic> toJson() => {
@@ -163,17 +171,12 @@ class HubModel {
     'deviceCount': deviceCount,
     'operatorName': operatorName,
     'operatorMobile': operatorMobile,
+    'distance': distance, // ✅ NEW
   };
 }
 
 // ─────────────────────────────────────────────────────────────────────
 // HUB DEVICE MODEL
-// API response shape:
-// {
-//   id, deviceCode, connectivityStatus, iotStatusCode, lastPingAt,
-//   hub:    { id, hubName, address },
-//   device: { id, deviceId, deviceName, condition }
-// }
 // ─────────────────────────────────────────────────────────────────────
 class HubDeviceModel {
   final int id;
@@ -200,7 +203,32 @@ class HubDeviceModel {
     this.condition,
   });
 
-  bool get isOnline => connectivityStatus == 'online';
+  // ── CHANGE 1: isOnline is now driven by iotStatusCode == 0 (IDLE) ──
+  // STATUS codes:
+  //   0    → IDLE       → machine is free, booking allowed
+  //   1001 → WASH_10    → 10-min wash in progress
+  //   1002 → WASH_20    → 20-min wash in progress
+  //   1003 → WASH_50    → 50-min wash in progress
+  //   2000 → COMPLETED  → cycle done, not yet reset
+  bool get isOnline => iotStatusCode == 0;
+
+  // ── CHANGE 2: human-readable IoT status label ──────────────────────
+  String get iotStatusLabel {
+    switch (iotStatusCode) {
+      case 0:
+        return 'Available';
+      case 1001:
+        return 'Busy – 10 min wash';
+      case 1002:
+        return 'Busy – 20 min wash';
+      case 1003:
+        return 'Busy – 50 min wash';
+      case 2000:
+        return 'Cycle Complete';
+      default:
+        return 'Unavailable';
+    }
+  }
 
   factory HubDeviceModel.fromJson(Map<String, dynamic> json) {
     final nested = json['device'] as Map<String, dynamic>?;
@@ -215,7 +243,12 @@ class HubDeviceModel {
         json['connectivityStatus'],
         fallback: 'offline',
       ),
-      iotStatusCode: _safeInt(json['iotStatusCode']) ?? 0,
+      // ── CHANGE 3: also accept 'iotStatus' or 'status' from backend ──
+      iotStatusCode:
+          _safeInt(json['iotStatusCode']) ??
+          _safeInt(json['iotStatus']) ??
+          _safeInt(json['status']) ??
+          0,
       isActive: _safeBool(json['isActive'], fallback: true),
       lastPingAt: json['lastPingAt'] != null
           ? DateTime.tryParse(json['lastPingAt'].toString())
@@ -241,10 +274,6 @@ class HubDeviceModel {
 
 // ─────────────────────────────────────────────────────────────────────
 // HUB PACKAGE MODEL
-//
-// ⚠️  FIX: All fields now use safe parsers.
-//    Old code did:  json['statusCode'] as int   → crashes if null/String
-//    New code does: _safeInt(json['statusCode']) → never crashes
 // ─────────────────────────────────────────────────────────────────────
 class HubPackageModel {
   final int id;
@@ -262,19 +291,13 @@ class HubPackageModel {
   });
 
   factory HubPackageModel.fromJson(Map<String, dynamic> json) {
-    // Log what we received so any future mismatch is immediately visible
     debugPrintPackage(json);
 
     return HubPackageModel(
-      // ✅ Safe — handles int, String, double, null
       id: _safeInt(json['id']) ?? 0,
-      // ✅ Safe — handles null (was: json['packageName'] as String → crash if null)
       packageName: _safeStr(json['packageName'], fallback: 'Unknown Package'),
-      // ✅ Already nullable
       description: json['description']?.toString(),
-      // ✅ Safe — handles null, String ("1"), double (was: json['statusCode'] as int → crash)
       statusCode: _safeInt(json['statusCode']) ?? 0,
-      // ✅ Safe — handles int, String, null
       price: _safeDouble(json['price']),
     );
   }
@@ -287,8 +310,6 @@ class HubPackageModel {
     'price': price,
   };
 
-  // Inline debug helper — prints field-by-field so you can see exactly
-  // what came from the backend and how it was parsed
   static void debugPrintPackage(Map<String, dynamic> json) {
     // ignore: avoid_print
     print('   [HubPackageModel] Parsing → $json');
@@ -418,6 +439,12 @@ class WashHistoryModel {
   final double finalAmount;
   final DateTime? createdAt;
 
+  final String? hubName;
+  final String? hubAddress;
+  final String? deviceCode;
+  final String? deviceName;
+  final String? deviceCondition;
+
   const WashHistoryModel({
     required this.id,
     required this.userId,
@@ -435,34 +462,49 @@ class WashHistoryModel {
     this.couponDiscountPercentage,
     required this.finalAmount,
     this.createdAt,
+    this.hubName,
+    this.hubAddress,
+    this.deviceCode,
+    this.deviceName,
+    this.deviceCondition,
   });
 
   Duration get washDuration => washEndTime.difference(washStartTime);
+  bool get isCompleted => washEndTime.isBefore(DateTime.now());
 
-  factory WashHistoryModel.fromJson(Map<String, dynamic> json) =>
-      WashHistoryModel(
-        id: _safeInt(json['id']) ?? 0,
-        userId: _safeInt(json['userId']) ?? 0,
-        hubId: _safeInt(json['hubId']) ?? 0,
-        deviceId: _safeInt(json['deviceId']) ?? 0,
-        orderId: _safeInt(json['orderId']) ?? 0,
-        packageId: _safeInt(json['packageId']) ?? 0,
-        packageName: _safeStr(json['packageName']),
-        amount: _safeDouble(json['amount']),
-        razorpayOrderId: _safeStr(json['razorpayOrderId']),
-        razorpayPaymentId: _safeStr(json['razorpayPaymentId']),
-        washStartTime:
-            DateTime.tryParse(json['washStartTime'].toString()) ??
-            DateTime.now(),
-        washEndTime:
-            DateTime.tryParse(json['washEndTime'].toString()) ?? DateTime.now(),
-        couponCode: json['couponCode']?.toString(),
-        couponDiscountPercentage: _safeInt(json['couponDiscountPercentage']),
-        finalAmount: _safeDouble(json['finalAmount']),
-        createdAt: json['createdAt'] != null
-            ? DateTime.tryParse(json['createdAt'].toString())
-            : null,
-      );
+  factory WashHistoryModel.fromJson(Map<String, dynamic> json) {
+    final hub = json['Hub'] as Map<String, dynamic>?;
+    final device = json['Device'] as Map<String, dynamic>?;
+    final pkg = json['HubPackage'] as Map<String, dynamic>?;
+
+    return WashHistoryModel(
+      id: _safeInt(json['id']) ?? 0,
+      userId: _safeInt(json['userId']) ?? 0,
+      hubId: _safeInt(json['hubId']) ?? 0,
+      deviceId: _safeInt(json['deviceId']) ?? 0,
+      orderId: _safeInt(json['orderId']) ?? 0,
+      packageId: _safeInt(json['packageId']) ?? 0,
+      packageName: _safeStr(pkg?['packageName'] ?? json['packageName']),
+      amount: _safeDouble(json['amount']),
+      razorpayOrderId: _safeStr(json['razorpayOrderId']),
+      razorpayPaymentId: _safeStr(json['razorpayPaymentId']),
+      washStartTime:
+          DateTime.tryParse(json['washStartTime'].toString()) ?? DateTime.now(),
+      washEndTime:
+          DateTime.tryParse(json['washEndTime'].toString()) ?? DateTime.now(),
+      couponCode: json['couponCode']?.toString(),
+      couponDiscountPercentage: _safeInt(json['couponDiscountPercentage']),
+      finalAmount: _safeDouble(json['finalAmount']),
+      createdAt: json['createdAt'] != null
+          ? DateTime.tryParse(json['createdAt'].toString())
+          : null,
+      hubName: hub?['hubName']?.toString(),
+      hubAddress: hub?['address']?.toString(),
+      deviceCode: device?['deviceId']?.toString(),
+      deviceName: device?['deviceName']?.toString(),
+      deviceCondition: device?['condition']?.toString(),
+    );
+  }
 
   Map<String, dynamic> toJson() => {
     'id': id,
@@ -480,6 +522,9 @@ class WashHistoryModel {
     'couponCode': couponCode,
     'couponDiscountPercentage': couponDiscountPercentage,
     'finalAmount': finalAmount,
+    'hubName': hubName,
+    'deviceCode': deviceCode,
+    'deviceName': deviceName,
   };
 }
 

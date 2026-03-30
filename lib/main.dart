@@ -1,10 +1,20 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import 'package:wash_user/services/washing_session.dart';
 import 'package:wash_user/views/login_page.dart';
-import 'package:wash_user/views/qrscanner/payment_failed_page.dart';
-import 'package:wash_user/views/qrscanner/payment_successfull.dart';
 
-void main() {
-  runApp(const CleanWashApp());
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // Restore any wash session that was active before app was killed
+  await WashSessionManager.instance.tryRestoreSession();
+
+  runApp(
+    ChangeNotifierProvider.value(
+      value: WashSessionManager.instance,
+      child: const CleanWashApp(),
+    ),
+  );
 }
 
 class CleanWashApp extends StatelessWidget {

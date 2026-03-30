@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:wash_user/models/usermodel.dart';
 import 'package:wash_user/services/api_service.dart';
+import 'package:wash_user/views/home.dart';
 
 import 'package:wash_user/views/qrscanner/payment_failed_page.dart';
 import 'package:wash_user/views/qrscanner/payment_successfull.dart';
@@ -69,6 +70,14 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
       _discountPct > 0 ? _basePrice * (1 - _discountPct / 100) : _basePrice;
   double get _discount => _basePrice - _finalPrice;
 
+  int get _selectedDurationMinutes {
+    const durations = [5, 10, 20];
+    if (_selectedPkg >= 0 && _selectedPkg < durations.length) {
+      return durations[_selectedPkg];
+    }
+    return 5;
+  }
+
   // ─────────────────────────────────────────────────────────────────────
   // LIFECYCLE
   // ─────────────────────────────────────────────────────────────────────
@@ -86,7 +95,11 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
     debugPrint('║  Hub ID   → ${widget.hub.id}');
     debugPrint('║  Device   → ${widget.device.deviceCode}');
     debugPrint('║  Dev ID   → ${widget.device.id}');
-    debugPrint('║  Online?  → ${widget.device.isOnline}');
+    // FIXED: log iotStatusCode instead of raw connectivityStatus
+    debugPrint(
+      '║  IoT Status → ${widget.device.iotStatusCode} (${widget.device.iotStatusLabel})',
+    );
+    debugPrint('║  isOnline   → ${widget.device.isOnline}');
     debugPrint('╚══════════════════════════════════════════════════╝');
   }
 
@@ -205,30 +218,41 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
           context,
           MaterialPageRoute(
             builder: (_) => PaymentSuccessPage(
-              amountPaid: _finalPrice.toStringAsFixed(0),
+              amountPaid: _finalPrice.round(),
               deviceCode: widget.device.deviceCode,
               paymentId: response.paymentId,
-              onGoHome: () => Navigator.of(context).popUntil((r) => r.isFirst),
+              durationMinutes: _selectedDurationMinutes,
+              packageName: _currentPkg?.packageName ?? '—',
+              hubName: widget.hub.hubName,
+              hubId: widget.hub.id.toString(),
+              hubDeviceId: widget.device.id.toString(), // ← ADD
             ),
           ),
           (route) => false,
         );
       } else {
-        debugPrint('   ❌ Verification failed → ${result.errorMessage}');
-        _showErrorDialog(
-          'Booking Failed',
-          'Payment successful but verification failed: '
-              '${result.errorMessage ?? 'Unknown error'}',
-        );
+        final errorMsg = result.errorMessage ?? 'Unknown error';
+        debugPrint('   ❌ Verification failed → $errorMsg');
+
+        if (_isActiveOrderError(errorMsg)) {
+          _showActiveOrderConflictDialog(
+            paymentId: response.paymentId ?? '',
+            amountPaid: _finalPrice.round(),
+          );
+        } else {
+          _showPaymentSuccessButBookingFailedDialog(
+            errorMsg: errorMsg,
+            paymentId: response.paymentId ?? '',
+          );
+        }
       }
     } catch (e, stack) {
       debugPrint('   ❌ Exception in _handlePaymentSuccess → $e');
       debugPrint('   Stack → $stack');
       if (mounted) {
-        _showErrorDialog(
-          'Booking Failed',
-          'Payment successful but booking failed: '
-              '${e.toString().replaceFirst('Exception: ', '')}',
+        _showPaymentSuccessButBookingFailedDialog(
+          errorMsg: e.toString().replaceFirst('Exception: ', ''),
+          paymentId: response.paymentId ?? '',
         );
       }
     } finally {
@@ -236,6 +260,315 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
         setState(() => _isProcessing = false);
         debugPrint('   [STATE] _isProcessing = false (finally)');
       }
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Check if the error is the "active order" conflict
+  // ─────────────────────────────────────────────────────────────────────
+  bool _isActiveOrderError(String errorMsg) {
+    final lower = errorMsg.toLowerCase();
+    return lower.contains('active') ||
+        lower.contains('active paid order') ||
+        lower.contains('already has an active') ||
+        lower.contains('pending order') ||
+        lower.contains('existing order');
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Dialog shown when device has an active order conflict.
+  // ─────────────────────────────────────────────────────────────────────
+  void _showActiveOrderConflictDialog({
+    required String paymentId,
+    required int amountPaid,
+  }) {
+    debugPrint('   [DIALOG] Showing active order conflict dialog');
+    debugPrint('   [DIALOG] paymentId=$paymentId  amountPaid=₹$amountPaid');
+    if (!mounted) return;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        backgroundColor: _C.card,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Row(
+          children: const [
+            Icon(
+              Icons.warning_amber_rounded,
+              color: Colors.orangeAccent,
+              size: 26,
+            ),
+            SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'Device Busy',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'This machine already has an active wash session in progress.',
+              style: TextStyle(
+                color: Colors.white70,
+                fontSize: 14,
+                height: 1.5,
+              ),
+            ),
+            const SizedBox(height: 14),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.orange.withOpacity(0.08),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: Colors.orangeAccent.withOpacity(0.3)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Your payment details:',
+                    style: TextStyle(
+                      color: Colors.white54,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    '₹$amountPaid charged',
+                    style: const TextStyle(
+                      color: Colors.orangeAccent,
+                      fontSize: 15,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  if (paymentId.isNotEmpty) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      'ID: $paymentId',
+                      style: const TextStyle(
+                        color: Colors.white38,
+                        fontSize: 10,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 14),
+            const Text(
+              '• Your payment will be refunded automatically within 5–7 business days.\n'
+              '• Or try a different machine nearby.\n'
+              '• Contact support with your Payment ID if not refunded.',
+              style: TextStyle(
+                color: Colors.white60,
+                fontSize: 12,
+                height: 1.6,
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              debugPrint('   [DIALOG] User chose: Try Another Machine');
+              Navigator.of(context)
+                ..pop()
+                ..pop();
+            },
+            child: const Text(
+              'Try Another',
+              style: TextStyle(color: _C.cyan, fontWeight: FontWeight.w600),
+            ),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              debugPrint('   [DIALOG] User chose: Go Home');
+              Navigator.of(context).pushAndRemoveUntil(
+                MaterialPageRoute(builder: (context) => const Homepage()),
+                (route) => false,
+              );
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: _C.cyan,
+              foregroundColor: Colors.black,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20),
+              ),
+              elevation: 0,
+            ),
+            child: const Text(
+              'Go Home',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Generic dialog for "payment charged but booking failed"
+  // ─────────────────────────────────────────────────────────────────────
+  void _showPaymentSuccessButBookingFailedDialog({
+    required String errorMsg,
+    required String paymentId,
+  }) {
+    debugPrint('   [DIALOG] Showing payment-success-but-booking-failed dialog');
+    if (!mounted) return;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        backgroundColor: _C.card,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Row(
+          children: const [
+            Icon(Icons.error_outline, color: Colors.redAccent, size: 26),
+            SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'Booking Failed',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              errorMsg,
+              style: const TextStyle(
+                color: Colors.white70,
+                fontSize: 13,
+                height: 1.5,
+              ),
+            ),
+            const SizedBox(height: 14),
+            const Text(
+              '⚠️ Your payment was received but the booking could not be confirmed. '
+              'Please save your Payment ID and contact support. '
+              'A refund will be issued within 5–7 business days.',
+              style: TextStyle(
+                color: Colors.white54,
+                fontSize: 12,
+                height: 1.6,
+              ),
+            ),
+            if (paymentId.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.05),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Payment ID',
+                      style: TextStyle(color: Colors.white38, fontSize: 10),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      paymentId,
+                      style: const TextStyle(
+                        color: Colors.white70,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.of(context).pop();
+            },
+            child: const Text(
+              'OK',
+              style: TextStyle(color: _C.cyan, fontWeight: FontWeight.w600),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Check if device has active order BEFORE creating order
+  // FIXED: also checks iotStatusCode != 0 as an extra pre-flight guard
+  // ─────────────────────────────────────────────────────────────────────
+  Future<bool> _checkDeviceAvailability() async {
+    debugPrint('   [CHECK] Checking device availability before payment...');
+    try {
+      final result = await ApiService.getHubDeviceDetails(
+        widget.hub.id.toString(),
+        widget.device.id.toString(),
+      );
+
+      debugPrint('   [CHECK] result.success → ${result.success}');
+      debugPrint('   [CHECK] result.data    → ${result.data}');
+
+      if (!result.success) {
+        debugPrint('   [CHECK] ⚠️ Check failed — allowing payment to proceed');
+        return true;
+      }
+
+      final data = result.data ?? {};
+
+      // Re-parse the fresh device to get latest iotStatusCode
+      final rawDevice =
+          data['hubDevice'] ?? data['device'] ?? data['data'] ?? data;
+      if (rawDevice is Map<String, dynamic>) {
+        final freshDevice = HubDeviceModel.fromJson(rawDevice);
+        debugPrint(
+          '   [CHECK] fresh iotStatusCode → ${freshDevice.iotStatusCode} (${freshDevice.iotStatusLabel})',
+        );
+        // FIXED: block if iotStatusCode is anything other than 0 (IDLE)
+        if (!freshDevice.isOnline) {
+          debugPrint(
+            '   [CHECK] ❌ Device not IDLE (iotStatusCode=${freshDevice.iotStatusCode}) — blocking payment',
+          );
+          return false;
+        }
+      }
+
+      final hasActiveOrder =
+          data['hasActiveOrder'] == true ||
+          data['isOccupied'] == true ||
+          data['status'] == 'occupied' ||
+          data['activeOrderId'] != null;
+
+      debugPrint('   [CHECK] hasActiveOrder → $hasActiveOrder');
+      return !hasActiveOrder;
+    } catch (e) {
+      debugPrint('   [CHECK] ⚠️ Exception → $e — allowing payment to proceed');
+      return true;
     }
   }
 
@@ -305,6 +638,7 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
 
   // ─────────────────────────────────────────────────────────────────────
   // MAIN PAYMENT FLOW
+  // FIXED: isOnline check now reflects iotStatusCode == 0
   // ─────────────────────────────────────────────────────────────────────
 
   Future<void> _processPayment() async {
@@ -331,19 +665,38 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
     debugPrint(
       '   Coupon    → applied=$_couponApplied  code=${_couponCtrl.text}',
     );
-    debugPrint('   Device online? → ${widget.device.isOnline}');
+    // FIXED: log iotStatusCode and label
+    debugPrint(
+      '   IoT Status → ${widget.device.iotStatusCode} (${widget.device.iotStatusLabel})',
+    );
+    debugPrint('   isOnline   → ${widget.device.isOnline}');
 
+    // FIXED: guard uses isOnline which is now iotStatusCode == 0
     if (!widget.device.isOnline) {
-      debugPrint('   ❌ Device offline — showing error');
+      debugPrint('   ❌ Device not IDLE — showing error');
       _showErrorDialog(
-        'Device Offline',
-        'Device is offline. Please try another device.',
+        'Machine Unavailable',
+        'Machine is currently ${widget.device.iotStatusLabel}. Please try another machine.',
       );
       return;
     }
 
     setState(() => _isProcessing = true);
     debugPrint('   [STATE] _isProcessing = true');
+
+    final isAvailable = await _checkDeviceAvailability();
+    if (!isAvailable) {
+      debugPrint('   ❌ Device not available — blocking payment');
+      if (mounted) {
+        setState(() => _isProcessing = false);
+        _showErrorDialog(
+          'Machine Busy',
+          'This machine is currently ${widget.device.iotStatusLabel}. '
+              'Please try a different machine or wait for the current session to complete.',
+        );
+      }
+      return;
+    }
 
     BuildContext? dialogCtx;
 
@@ -384,9 +737,6 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
         );
       }
 
-      // ✅ FIX: extract couponCode once so it is used consistently in
-      // both orderData (sent to backend) AND stored for session logging.
-      // Previously the inline if-spread was correct but hard to trace in logs.
       final String? appliedCoupon =
           (_couponApplied && _couponCtrl.text.trim().isNotEmpty)
           ? _couponCtrl.text.trim().toUpperCase()
@@ -409,19 +759,26 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
       debugPrint('   [ORDER] errorMessage → ${result.errorMessage}');
 
       if (!result.success) {
-        throw Exception(
-          result.errorMessage ?? 'Failed to create payment order',
-        );
+        final errMsg = result.errorMessage ?? 'Failed to create payment order';
+        if (_isActiveOrderError(errMsg)) {
+          if (dialogCtx != null && mounted) Navigator.pop(dialogCtx!);
+          if (mounted) {
+            setState(() => _isProcessing = false);
+            _showErrorDialog(
+              'Machine Busy',
+              'This machine already has an active wash session. '
+                  'Please try a different machine.',
+            );
+          }
+          return;
+        }
+        throw Exception(errMsg);
       }
 
       final data = result.data!;
       final nestedOrder = data['order'] as Map<String, dynamic>?;
       final sessionData = data['sessionData'] as Map<String, dynamic>?;
 
-      // ✅ FIX: backend createOrder does NOT include couponCode in sessionData.
-      // verifyPayment reads sessionData.couponCode to apply the discount.
-      // So we inject the coupon code here before storing _sessionData,
-      // otherwise the backend charges full price even when coupon is applied.
       if (sessionData != null && appliedCoupon != null) {
         _sessionData = Map<String, dynamic>.from(sessionData)
           ..['couponCode'] = appliedCoupon;
@@ -469,11 +826,6 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
       }
 
       final double amountDouble = double.tryParse(rawAmount.toString()) ?? 0.0;
-
-      // ✅ FIX: Use _finalPrice (which already has coupon discount applied)
-      // NOT amountDouble from backend — backend returns full price always.
-      // e.g. package=₹2, coupon=50% → _finalPrice=₹1 → amountPaise=100
-      // Without this fix Razorpay charges ₹2 even when coupon is applied.
       final double chargeAmount = _finalPrice > 0 ? _finalPrice : amountDouble;
       final int amountPaise = (chargeAmount * 100).round();
 
@@ -556,7 +908,6 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
     debugPrint('   userMobile  → $_userMobile');
 
     try {
-      // ✅ Razorpay live mode requires E.164 format (+91XXXXXXXXXX)
       final String rawMobile = _userMobile.isNotEmpty
           ? _userMobile
           : (widget.hub.mobile ?? '');
@@ -566,7 +917,6 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
           ? '+91$rawMobile'
           : '';
 
-      // ✅ Use a clean generic email — constructed fake emails can be flagged
       final String email = 'user@wash.app';
 
       final options = {
@@ -723,7 +1073,7 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
   }
 
   // ─────────────────────────────────────────────────────────────────────
-  // COUPON  ✅ NOW CALLS BACKEND — no more hardcoded demo map
+  // COUPON
   // ─────────────────────────────────────────────────────────────────────
 
   Future<void> _applyCoupon() async {
@@ -747,7 +1097,6 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
 
     try {
       debugPrint('   Calling ApiService.validateCoupon("$code")...');
-      // ✅ FIX: backend verifyCoupon requires both couponCode AND amount
       final result = await ApiService.validateCoupon(code, _basePrice);
 
       debugPrint('   [COUPON] success      → ${result.success}');
@@ -757,7 +1106,6 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
       if (!mounted) return;
 
       if (result.success) {
-        // Backend returns discount percentage — try common field names
         final dynamic rawPct =
             result.data?['discountPercentage'] ??
             result.data?['discount'] ??
@@ -972,6 +1320,7 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
 
   // ─────────────────────────────────────────────────────────────────────
   // MACHINE CARD
+  // FIXED: badge uses iotStatusLabel, color uses isOnline
   // ─────────────────────────────────────────────────────────────────────
 
   Widget _buildMachineCard() {
@@ -1014,6 +1363,7 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
                   ),
                 ),
                 const SizedBox(height: 6),
+                // FIXED: badge label from iotStatusLabel, color from isOnline
                 IntrinsicWidth(
                   child: Container(
                     padding: const EdgeInsets.symmetric(
@@ -1028,7 +1378,7 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
                       borderRadius: BorderRadius.circular(20),
                     ),
                     child: Text(
-                      d.connectivityStatus,
+                      d.iotStatusLabel,
                       style: TextStyle(
                         color: d.isOnline ? _C.green : _C.red,
                         fontSize: 11,
@@ -1194,8 +1544,6 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
         Container(
           height: 54,
           decoration: BoxDecoration(
-            // ✅ FIX: container turns green-tinted when coupon applied
-            // so the user gets clear visual feedback the state changed
             color: _couponApplied ? Colors.green.shade50 : Colors.white,
             borderRadius: BorderRadius.circular(32),
             border: _couponApplied
@@ -1209,17 +1557,12 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
                 _couponApplied
                     ? Icons.check_circle
                     : Icons.local_offer_outlined,
-                // ✅ FIX: solid green check when applied
                 color: _couponApplied ? Colors.green : Colors.black45,
                 size: 20,
               ),
               const SizedBox(width: 10),
               Expanded(
                 child: _couponApplied
-                    // ✅ FIX: when applied, show a plain Text widget instead
-                    // of TextField. TextField with enabled:false still shows
-                    // the typed text (not hintText), so the discount % never
-                    // appeared. Plain Text always shows exactly what we want.
                     ? Text(
                         '${_couponCtrl.text}  −$_discountPct%',
                         style: TextStyle(
@@ -1236,16 +1579,15 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
                           fontSize: 14,
                           fontWeight: FontWeight.w600,
                         ),
-                        decoration: InputDecoration(
+                        decoration: const InputDecoration(
                           hintText: 'Enter Coupon Code',
-                          hintStyle: const TextStyle(
+                          hintStyle: TextStyle(
                             color: Colors.black38,
                             fontSize: 14,
                           ),
                           border: InputBorder.none,
                           isDense: true,
                           contentPadding: EdgeInsets.zero,
-                          // error shown outside the pill — no errorText here
                         ),
                       ),
               ),
@@ -1263,11 +1605,7 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
                 )
               else
                 GestureDetector(
-                  onTap: _couponApplied
-                      ? _removeCoupon
-                      : () {
-                          _applyCoupon();
-                        },
+                  onTap: _couponApplied ? _removeCoupon : _applyCoupon,
                   child: Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 16),
                     child: Text(
@@ -1285,8 +1623,6 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
             ],
           ),
         ),
-        // ✅ error text shown OUTSIDE the pill so it doesn't
-        // squash the row height or get clipped
         if (_couponError != null && !_couponApplied)
           Padding(
             padding: const EdgeInsets.only(left: 16, top: 6),

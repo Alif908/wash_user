@@ -1,19 +1,29 @@
-// lib/views/qrscanner/payment_success_page.dart
+// lib/views/qrscanner/payment_successfull.dart
 
 import 'package:flutter/material.dart';
+import 'package:wash_user/services/washing_session.dart';
+import 'package:wash_user/views/homepage/profile/washing_status.dart';
 
 class PaymentSuccessPage extends StatefulWidget {
-  final String? amountPaid;
-  final String? deviceCode;
+  final int amountPaid;
+  final String deviceCode;
   final String? paymentId;
-  final VoidCallback? onGoHome;
+  final int durationMinutes;
+  final String packageName;
+  final String hubName;
+  final String? hubId;
+  final String? hubDeviceId;
 
   const PaymentSuccessPage({
     super.key,
-    this.amountPaid,
-    this.deviceCode,
+    required this.amountPaid,
+    required this.deviceCode,
+    required this.durationMinutes,
+    required this.packageName,
+    required this.hubName,
     this.paymentId,
-    this.onGoHome,
+    this.hubId,
+    this.hubDeviceId,
   });
 
   @override
@@ -57,13 +67,54 @@ class _PaymentSuccessPageState extends State<PaymentSuccessPage>
     super.dispose();
   }
 
-  void _goHome() {
-    if (widget.onGoHome != null) {
-      widget.onGoHome!();
-    } else {
-      Navigator.of(context).popUntil((route) => route.isFirst);
+  //=================================================================================================================================
+  //=====================================================================================================================================
+
+  void _goToWashing() async {
+    // ✅ Step 1: check null
+    if (widget.hubId == null || widget.hubDeviceId == null) {
+      print("❌ hubId or hubDeviceId is NULL");
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Something went wrong. Please try again'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
     }
+
+    // ✅ Step 2: start session with REAL values
+    await WashSessionManager.instance.startSession(
+      durationMinutes: widget.durationMinutes,
+      hubId: widget.hubId!, // ✅ FIXED
+      hubDeviceId: widget.hubDeviceId!, // ✅ FIXED
+      deviceCode: widget.deviceCode,
+      hubName: widget.hubName,
+      packageName: widget.packageName,
+      amountPaid: widget.amountPaid.toDouble(),
+      paymentId: widget.paymentId,
+    );
+
+    if (!mounted) return;
+
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(
+        builder: (_) => WashingStatus(
+          durationMinutes: widget.durationMinutes,
+          amountPaid: widget.amountPaid.toDouble(),
+          packageName: widget.packageName,
+          deviceCode: widget.deviceCode,
+          hubName: widget.hubName,
+          paymentId: widget.paymentId,
+          hubId: widget.hubId,
+          hubDeviceId: widget.hubDeviceId,
+        ),
+      ),
+      (route) => route.isFirst,
+    );
   }
+  // ── END OF CHANGE ────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
@@ -71,135 +122,193 @@ class _PaymentSuccessPageState extends State<PaymentSuccessPage>
 
     return PopScope(
       canPop: false,
-      onPopInvokedWithResult: (didPop, result) {
-        if (!didPop) _goHome();
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _goToWashing();
       },
       child: Scaffold(
         backgroundColor: _bg,
         body: SafeArea(
-          child: Padding(
-            padding: EdgeInsets.fromLTRB(24, 0, 24, 24 + bottomPad),
-            child: Column(
-              children: [
-                const Spacer(flex: 2),
-
-                // ── Animated Card ─────────────────────────────────────────
-                FadeTransition(
-                  opacity: _fadeAnim,
-                  child: ScaleTransition(
-                    scale: _scaleAnim,
-                    child: Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.fromLTRB(24, 36, 24, 28),
-                      decoration: BoxDecoration(
-                        color: _card,
-                        borderRadius: BorderRadius.circular(20),
-                      ),
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              return SingleChildScrollView(
+                physics: const ClampingScrollPhysics(),
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(minHeight: constraints.maxHeight),
+                  child: IntrinsicHeight(
+                    child: Padding(
+                      padding: EdgeInsets.fromLTRB(24, 0, 24, 24 + bottomPad),
                       child: Column(
-                        mainAxisSize: MainAxisSize.min,
                         children: [
-                          // ── Green checkmark circle ────────────────────
-                          ScaleTransition(
-                            scale: _checkAnim,
-                            child: Container(
-                              width: 80,
-                              height: 80,
-                              decoration: const BoxDecoration(
-                                color: _green,
-                                shape: BoxShape.circle,
-                              ),
-                              child: const Icon(
-                                Icons.check_rounded,
-                                color: Colors.white,
-                                size: 46,
+                          const Spacer(flex: 2),
+
+                          FadeTransition(
+                            opacity: _fadeAnim,
+                            child: ScaleTransition(
+                              scale: _scaleAnim,
+                              child: Container(
+                                width: double.infinity,
+                                padding: const EdgeInsets.fromLTRB(
+                                  24,
+                                  36,
+                                  24,
+                                  28,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: _card,
+                                  borderRadius: BorderRadius.circular(20),
+                                ),
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    ScaleTransition(
+                                      scale: _checkAnim,
+                                      child: Container(
+                                        width: 80,
+                                        height: 80,
+                                        decoration: const BoxDecoration(
+                                          color: _green,
+                                          shape: BoxShape.circle,
+                                        ),
+                                        child: const Icon(
+                                          Icons.check_rounded,
+                                          color: Colors.white,
+                                          size: 46,
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 20),
+
+                                    const Text(
+                                      'Payment Successful!',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 22,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 6),
+                                    Text(
+                                      'Your wash session is starting now.',
+                                      style: TextStyle(
+                                        color: Colors.white.withOpacity(0.55),
+                                        fontSize: 14,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 24),
+
+                                    Container(
+                                      width: double.infinity,
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFF111111),
+                                        borderRadius: BorderRadius.circular(12),
+                                        border: Border.all(
+                                          color: Colors.white10,
+                                        ),
+                                      ),
+                                      child: Column(
+                                        children: [
+                                          Container(
+                                            width: double.infinity,
+                                            padding: const EdgeInsets.symmetric(
+                                              vertical: 12,
+                                            ),
+                                            decoration: const BoxDecoration(
+                                              color: Color(0xFF222222),
+                                              borderRadius:
+                                                  BorderRadius.vertical(
+                                                    top: Radius.circular(12),
+                                                  ),
+                                            ),
+                                            child: const Text(
+                                              'Order Details',
+                                              textAlign: TextAlign.center,
+                                              style: TextStyle(
+                                                color: Colors.white,
+                                                fontSize: 15,
+                                                fontWeight: FontWeight.bold,
+                                              ),
+                                            ),
+                                          ),
+                                          _DetailRow(
+                                            label: 'Amount Paid',
+                                            value: '₹ ${widget.amountPaid}',
+                                            valueColor: Colors.white,
+                                            showDivider: true,
+                                          ),
+                                          _DetailRow(
+                                            label: 'Package',
+                                            value: widget.packageName,
+                                            valueColor: Colors.white,
+                                            showDivider: true,
+                                          ),
+                                          _DetailRow(
+                                            label: 'Duration',
+                                            value:
+                                                '${widget.durationMinutes} min',
+                                            valueColor: Colors.white,
+                                            showDivider: true,
+                                          ),
+                                          _DetailRow(
+                                            label: 'Device',
+                                            value: widget.deviceCode,
+                                            valueColor: Colors.white,
+                                            showDivider: true,
+                                          ),
+                                          if (widget.paymentId != null)
+                                            _DetailRow(
+                                              label: 'Payment ID',
+                                              value: widget.paymentId!,
+                                              valueColor: Colors.white70,
+                                              showDivider: true,
+                                              small: true,
+                                            ),
+                                          _DetailRow(
+                                            label: 'Status',
+                                            value: 'PAID',
+                                            valueColor: _green,
+                                            showDivider: false,
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
                             ),
                           ),
-                          const SizedBox(height: 20),
 
-                          const Text(
-                            'Payment Successful!',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 22,
-                              fontWeight: FontWeight.bold,
-                              letterSpacing: 0.3,
-                            ),
-                          ),
-                          const SizedBox(height: 24),
+                          const Spacer(flex: 2),
 
-                          // ── Order Details Card ────────────────────────
-                          Container(
-                            width: double.infinity,
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF111111),
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(
-                                color: Colors.white10,
-                                width: 1,
+                          FadeTransition(
+                            opacity: _fadeAnim,
+                            child: SizedBox(
+                              width: double.infinity,
+                              height: 54,
+                              child: ElevatedButton.icon(
+                                onPressed: _goToWashing,
+                                icon: const Icon(
+                                  Icons.local_laundry_service_outlined,
+                                  color: Colors.black,
+                                  size: 20,
+                                ),
+                                label: const Text(
+                                  'TRACK MY WASH',
+                                  style: TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.bold,
+                                    letterSpacing: 1.2,
+                                    color: Colors.black,
+                                  ),
+                                ),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: _cyan,
+                                  foregroundColor: Colors.black,
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(32),
+                                  ),
+                                  elevation: 0,
+                                ),
                               ),
-                            ),
-                            child: Column(
-                              children: [
-                                // Header
-                                Container(
-                                  width: double.infinity,
-                                  padding: const EdgeInsets.symmetric(
-                                    vertical: 12,
-                                  ),
-                                  decoration: const BoxDecoration(
-                                    color: Color(0xFF222222),
-                                    borderRadius: BorderRadius.vertical(
-                                      top: Radius.circular(12),
-                                    ),
-                                  ),
-                                  child: const Text(
-                                    'Order Details',
-                                    textAlign: TextAlign.center,
-                                    style: TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 15,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                ),
-
-                                // Amount Paid
-                                _DetailRow(
-                                  label: 'Amount Paid',
-                                  value: widget.amountPaid != null
-                                      ? '₹ ${widget.amountPaid}'
-                                      : '₹ —',
-                                  valueColor: Colors.white,
-                                  showDivider: true,
-                                ),
-
-                                // Device
-                                _DetailRow(
-                                  label: 'Device',
-                                  value: widget.deviceCode ?? '—',
-                                  valueColor: Colors.white,
-                                  showDivider: true,
-                                ),
-
-                                // Payment ID
-                                if (widget.paymentId != null)
-                                  _DetailRow(
-                                    label: 'Payment ID',
-                                    value: widget.paymentId!,
-                                    valueColor: Colors.white70,
-                                    showDivider: true,
-                                    small: true,
-                                  ),
-
-                                // Status
-                                _DetailRow(
-                                  label: 'Status',
-                                  value: 'COMPLETED',
-                                  valueColor: _green,
-                                  showDivider: false,
-                                ),
-                              ],
                             ),
                           ),
                         ],
@@ -207,39 +316,8 @@ class _PaymentSuccessPageState extends State<PaymentSuccessPage>
                     ),
                   ),
                 ),
-
-                const Spacer(flex: 2),
-
-                // ── Go to Home Button ─────────────────────────────────────
-                FadeTransition(
-                  opacity: _fadeAnim,
-                  child: SizedBox(
-                    width: double.infinity,
-                    height: 54,
-                    child: ElevatedButton(
-                      onPressed: _goHome,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: _cyan,
-                        foregroundColor: Colors.black,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(32),
-                        ),
-                        elevation: 0,
-                      ),
-                      child: const Text(
-                        'GO TO HOME',
-                        style: TextStyle(
-                          fontSize: 15,
-                          fontWeight: FontWeight.bold,
-                          letterSpacing: 1.2,
-                          color: Colors.black,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
+              );
+            },
           ),
         ),
       ),
@@ -247,7 +325,7 @@ class _PaymentSuccessPageState extends State<PaymentSuccessPage>
   }
 }
 
-// ── Detail Row ────────────────────────────────────────────────────────────────
+// ── Detail Row — completely unchanged ────────────────────────────────────────
 class _DetailRow extends StatelessWidget {
   final String label;
   final String value;

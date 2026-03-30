@@ -3,16 +3,16 @@ import 'package:wash_user/views/homepage/map_page.dart';
 import 'package:wash_user/views/homepage/profile/profile_page.dart';
 import 'package:wash_user/views/qrscanner/qr_scanner_page.dart';
 
-class Home extends StatefulWidget {
+class Homepage extends StatefulWidget {
   final int initialTabIndex;
 
-  const Home({super.key, this.initialTabIndex = 0});
+  const Homepage({super.key, this.initialTabIndex = 0});
 
   @override
-  State<Home> createState() => _HomeState();
+  State<Homepage> createState() => _HomepageState();
 }
 
-class _HomeState extends State<Home> {
+class _HomepageState extends State<Homepage> {
   late int _selectedScreen;
   late final List<Widget> _screens;
 

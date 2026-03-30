@@ -9,9 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 class ApiService {
   // ── Base URL ─────────────────────────────────────────────────────────
-  // Your PC WiFi IP: 192.168.1.5  |  Port: 5000
-  // Phone & PC must be on the SAME WiFi network
-  static const String baseUrl = "http://192.168.1.3:5000/api/user";
+  static const String baseUrl = "https://be.washist.com/api/user";
 
   // ── Token Storage ─────────────────────────────────────────────────────
   static Future<void> saveToken(String token) async {
@@ -45,7 +43,6 @@ class ApiService {
   // ─────────────────────────────────────────────────────────────────────
   // 1. SEND OTP
   // POST /api/user/send-otp
-  // Body: { "mobile": "+91XXXXXXXXXX", "name": "User" }
   // ─────────────────────────────────────────────────────────────────────
   static Future<ApiResult> sendOtp(String phone) async {
     try {
@@ -78,17 +75,11 @@ class ApiService {
   // ─────────────────────────────────────────────────────────────────────
   // 2. VERIFY OTP
   // POST /api/user/verify-otp
-  // Body: { "mobile": "+91XXXXXXXXXX", "otp": "1234" }
-  // Response: { "token": "...", "user": { ... } }
   // ─────────────────────────────────────────────────────────────────────
   static Future<ApiResult> verifyOtp(String phone, String otp) async {
     try {
       developer.log('── VERIFY OTP ────────────────────', name: 'ApiService');
       developer.log('URL  : $baseUrl/verify-otp', name: 'ApiService');
-      developer.log(
-        'BODY : ${jsonEncode({'mobile': phone, 'otp': otp})}',
-        name: 'ApiService',
-      );
 
       final response = await http
           .post(
@@ -103,13 +94,11 @@ class ApiService {
 
       final result = _handleResponse(response);
 
-      // Auto-save token + user data on success
       if (result.success) {
         if (result.data?['token'] != null) {
           await saveToken(result.data!['token']);
           developer.log('TOKEN : saved ✅', name: 'ApiService');
         }
-        // Save user info for profile page
         final prefs = await SharedPreferences.getInstance();
         final user = result.data?['user'];
         if (user != null) {
@@ -141,7 +130,6 @@ class ApiService {
   // ─────────────────────────────────────────────────────────────────────
   // 3. UPDATE LOCATION
   // POST /api/user/update-location  [auth required]
-  // Body: { "latitude": 10.22, "longitude": 76.19 }
   // ─────────────────────────────────────────────────────────────────────
   static Future<ApiResult> updateLocation(double lat, double lng) async {
     try {
@@ -240,7 +228,6 @@ class ApiService {
   // ─────────────────────────────────────────────────────────────────────
   // 8. CREATE ORDER
   // POST /api/user/create-order  [auth required]
-  // Body: { "packageId": "...", "hubDeviceId": "...", "couponCode"?: "..." }
   // ─────────────────────────────────────────────────────────────────────
   static Future<ApiResult> createOrder(Map<String, dynamic> orderData) async {
     try {
@@ -262,8 +249,6 @@ class ApiService {
   // ─────────────────────────────────────────────────────────────────────
   // 9. VERIFY PAYMENT
   // POST /api/user/verify-payment  [auth required]
-  // Body: { "razorpay_order_id": "...", "razorpay_payment_id": "...",
-  //         "razorpay_signature": "...", "sessionData": { ... } }
   // ─────────────────────────────────────────────────────────────────────
   static Future<ApiResult> verifyPayment(
     Map<String, dynamic> paymentData,
@@ -285,35 +270,16 @@ class ApiService {
   }
 
   // ─────────────────────────────────────────────────────────────────────
-  // 10. VALIDATE COUPON  ✅ NEW — fixes "Invalid coupon code" bug
-  // POST /api/user/validate-coupon  [auth required]
-  // Body: { "couponCode": "0908" }
-  // Response: { "discountPercentage": 50, ... }
-  //
-  // ⚠️  If your backend route name differs, update the URL below.
-  //     Open userRoutes.js and search for your coupon route. Examples:
-  //       POST /api/user/apply-coupon
-  //       POST /api/user/coupon/validate
-  //       GET  /api/user/validate-coupon?code=0908
+  // 10. VALIDATE COUPON
+  // POST /api/coupon/verify-coupon  [auth required]
   // ─────────────────────────────────────────────────────────────────────
   static Future<ApiResult> validateCoupon(
     String couponCode,
     double amount,
   ) async {
-    // ✅ FIX: coupon route is at /api/coupon/verify-coupon (couponRoutes.js)
-    // The route /api/user/validate-coupon does NOT exist in userRoutes.js
-    // couponRoutes.js has: router.post('/verify-coupon', userMiddleware, verifyCoupon)
-    // server.js mounts it as: app.use('/api/coupon', couponRoutes)
-    // So the correct full URL is: /api/coupon/verify-coupon
-    const couponBaseUrl = "http://192.168.1.4:5000/api/coupon";
+    const couponBaseUrl = "https://be.washist.com/api/coupon";
     try {
       developer.log('── VALIDATE COUPON ───────────────', name: 'ApiService');
-      developer.log('URL  : $couponBaseUrl/verify-coupon', name: 'ApiService');
-      developer.log(
-        'BODY : ${jsonEncode({'couponCode': couponCode, 'amount': amount})}',
-        name: 'ApiService',
-      );
-
       final response = await http
           .post(
             Uri.parse('$couponBaseUrl/verify-coupon'),
@@ -324,7 +290,6 @@ class ApiService {
 
       developer.log('STATUS : ${response.statusCode}', name: 'ApiService');
       developer.log('BODY   : ${response.body}', name: 'ApiService');
-
       return _handleResponse(response);
     } on TimeoutException {
       return ApiResult.error('Request timed out.');
@@ -337,7 +302,6 @@ class ApiService {
   // ─────────────────────────────────────────────────────────────────────
   // 11. SUBMIT FEEDBACK
   // POST /api/user/submit-feedback  [auth required]
-  // Body: { "rating": 5, "comment": "Great service!" }
   // ─────────────────────────────────────────────────────────────────────
   static Future<ApiResult> submitFeedback(
     Map<String, dynamic> feedbackData,
@@ -415,6 +379,45 @@ class ApiService {
     }
   }
 
+  // ─────────────────────────────────────────────────────────────────────
+  // 15. GET ACTIVE WASH
+  // GET /api/user/active-wash  [auth required]
+  // ─────────────────────────────────────────────────────────────────────
+  static Future<ApiResult> getActiveWash() async {
+    try {
+      developer.log('── GET ACTIVE WASH ───────────────', name: 'ApiService');
+      developer.log('URL  : $baseUrl/active-wash', name: 'ApiService');
+
+      final response = await http
+          .get(Uri.parse('$baseUrl/active-wash'), headers: await _authHeaders)
+          .timeout(const Duration(seconds: 15));
+
+      developer.log('STATUS : ${response.statusCode}', name: 'ApiService');
+      developer.log('BODY   : ${response.body}', name: 'ApiService');
+
+      // ── HTML 404 guard ────────────────────────────────────────────────
+      // If Express hasn't registered the route yet it returns an HTML page.
+      // Treat it as "no active wash" so the UI shows Idle instead of crashing.
+      if (response.statusCode == 404) {
+        final body = response.body.trim();
+        if (body.startsWith('<!DOCTYPE') || body.startsWith('<html')) {
+          developer.log(
+            'WARN  : /active-wash route not on server yet — returning idle',
+            name: 'ApiService',
+          );
+          return ApiResult.success({'activeOrder': null});
+        }
+      }
+
+      return _handleResponse(response);
+    } on TimeoutException {
+      return ApiResult.error('Request timed out.');
+    } catch (e) {
+      developer.log('ERROR : $e', name: 'ApiService', error: e);
+      return ApiResult.error('Network error: $e');
+    }
+  }
+
   // ── Response Handler ──────────────────────────────────────────────────
   static ApiResult _handleResponse(http.Response response) {
     dynamic decoded;
@@ -439,6 +442,30 @@ class ApiService {
     } else {
       final message = body['message'] as String? ?? 'Something went wrong.';
       return ApiResult.error(message);
+    }
+  }
+
+  Future<void> createServiceTicket({
+    required String deviceId,
+    required String issue,
+    String? bookingId,
+  }) async {
+    final response = await http.post(
+      Uri.parse("$baseUrl/service-ticket"), // 🔁 change if your route differs
+      headers: {
+        "Content-Type": "application/json",
+        // add token if needed
+        // "Authorization": "Bearer $token",
+      },
+      body: jsonEncode({
+        "deviceId": deviceId,
+        "issue": issue,
+        "bookingId": bookingId,
+      }),
+    );
+
+    if (response.statusCode != 200 && response.statusCode != 201) {
+      throw Exception("Failed to create service ticket");
     }
   }
 }
