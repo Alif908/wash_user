@@ -1,5 +1,3 @@
-// lib/views/qrscanner/booking_machine_page.dart
-
 import 'package:flutter/material.dart';
 import 'package:razorpay_flutter/razorpay_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -99,7 +97,9 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
     debugPrint(
       '║  IoT Status → ${widget.device.iotStatusCode} (${widget.device.iotStatusLabel})',
     );
-    debugPrint('║  isOnline   → ${widget.device.isOnline}');
+    debugPrint(
+      '║  IoT Status → ${widget.device.iotStatusCode} (${widget.device.iotStatusLabel})',
+    );
     debugPrint('╚══════════════════════════════════════════════════╝');
   }
 
@@ -550,7 +550,7 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
           '   [CHECK] fresh iotStatusCode → ${freshDevice.iotStatusCode} (${freshDevice.iotStatusLabel})',
         );
         // FIXED: block if iotStatusCode is anything other than 0 (IDLE)
-        if (!freshDevice.isOnline) {
+        if (freshDevice.iotStatusCode != 0) {
           debugPrint(
             '   [CHECK] ❌ Device not IDLE (iotStatusCode=${freshDevice.iotStatusCode}) — blocking payment',
           );
@@ -669,10 +669,9 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
     debugPrint(
       '   IoT Status → ${widget.device.iotStatusCode} (${widget.device.iotStatusLabel})',
     );
-    debugPrint('   isOnline   → ${widget.device.isOnline}');
-
+    debugPrint('   iotStatusCode → ${widget.device.iotStatusCode}');
     // FIXED: guard uses isOnline which is now iotStatusCode == 0
-    if (!widget.device.isOnline) {
+    if (widget.device.iotStatusCode != 0) {
       debugPrint('   ❌ Device not IDLE — showing error');
       _showErrorDialog(
         'Machine Unavailable',
@@ -745,7 +744,7 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
       final orderData = <String, dynamic>{
         'packageId': _currentPkg!.id,
         'hubDeviceId': widget.device.id,
-        if (appliedCoupon != null) 'couponCode': appliedCoupon,
+        'couponCode': ?appliedCoupon,
       };
 
       debugPrint('');
@@ -1372,7 +1371,7 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
                     ),
                     decoration: BoxDecoration(
                       border: Border.all(
-                        color: d.isOnline ? _C.green : _C.red,
+                        color: d.iotStatusCode == 0 ? _C.green : _C.red,
                         width: 1,
                       ),
                       borderRadius: BorderRadius.circular(20),
@@ -1380,7 +1379,7 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
                     child: Text(
                       d.iotStatusLabel,
                       style: TextStyle(
-                        color: d.isOnline ? _C.green : _C.red,
+                        color: d.iotStatusCode == 0 ? _C.green : _C.red,
                         fontSize: 11,
                         fontWeight: FontWeight.w500,
                       ),
@@ -1443,13 +1442,14 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
   // ─────────────────────────────────────────────────────────────────────
 
   Widget _buildPackageButtons() {
-    if (_pkgLoading)
+    if (_pkgLoading) {
       return const SizedBox(
         height: 50,
         child: Center(
           child: CircularProgressIndicator(color: _C.cyan, strokeWidth: 2),
         ),
       );
+    }
     if (_pkgError != null) {
       return Row(
         children: [
@@ -1466,11 +1466,12 @@ class _BookMachineScreenState extends State<BookMachineScreen> {
         ],
       );
     }
-    if (_packages.isEmpty)
+    if (_packages.isEmpty) {
       return const Text(
         'No packages available.',
         style: TextStyle(color: Colors.white54, fontSize: 13),
       );
+    }
 
     return LayoutBuilder(
       builder: (context, constraints) {

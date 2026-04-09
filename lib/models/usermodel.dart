@@ -103,7 +103,7 @@ class HubModel {
   final int? deviceCount;
   final String? operatorName;
   final String? operatorMobile;
-  final double? distance; // ✅ NEW — distance in km from user's location
+  final double? distance;
 
   const HubModel({
     required this.id,
@@ -122,7 +122,7 @@ class HubModel {
     this.deviceCount,
     this.operatorName,
     this.operatorMobile,
-    this.distance, // ✅ NEW
+    this.distance,
   });
 
   factory HubModel.fromJson(Map<String, dynamic> json) => HubModel(
@@ -146,7 +146,6 @@ class HubModel {
     deviceCount: _safeInt(json['deviceCount']),
     operatorName: json['operatorName']?.toString(),
     operatorMobile: json['operatorMobile']?.toString(),
-    // ✅ NEW — backend may return 'distance' or 'distanceKm'
     distance: json['distance'] != null
         ? double.tryParse(json['distance'].toString())
         : json['distanceKm'] != null
@@ -171,7 +170,7 @@ class HubModel {
     'deviceCount': deviceCount,
     'operatorName': operatorName,
     'operatorMobile': operatorMobile,
-    'distance': distance, // ✅ NEW
+    'distance': distance,
   };
 }
 
@@ -203,31 +202,31 @@ class HubDeviceModel {
     this.condition,
   });
 
-  // ── CHANGE 1: isOnline is now driven by iotStatusCode == 0 (IDLE) ──
-  // STATUS codes:
-  //   0    → IDLE       → machine is free, booking allowed
-  //   1001 → WASH_10    → 10-min wash in progress
-  //   1002 → WASH_20    → 20-min wash in progress
-  //   1003 → WASH_50    → 50-min wash in progress
-  //   2000 → COMPLETED  → cycle done, not yet reset
-  bool get isOnline => iotStatusCode == 0;
+  bool get isAvailable => connectivityStatus == 'online' && iotStatusCode == 0;
 
-  // ── CHANGE 2: human-readable IoT status label ──────────────────────
+  bool get isBusy =>
+      connectivityStatus == 'online' &&
+      (iotStatusCode == 1001 || iotStatusCode == 1002 || iotStatusCode == 1003);
+
+  bool get isCompleted =>
+      connectivityStatus == 'online' && iotStatusCode == 2000;
+
+  bool get isOffline => connectivityStatus != 'online';
   String get iotStatusLabel {
-    switch (iotStatusCode) {
-      case 0:
-        return 'Available';
-      case 1001:
-        return 'Busy – 10 min wash';
-      case 1002:
-        return 'Busy – 20 min wash';
-      case 1003:
-        return 'Busy – 50 min wash';
-      case 2000:
-        return 'Cycle Complete';
-      default:
-        return 'Unavailable';
+    if (iotStatusCode == 0) return 'Available'; // online/offline nokkilla
+    if (isBusy) {
+      switch (iotStatusCode) {
+        case 1001:
+          return 'Busy – 10 min wash';
+        case 1002:
+          return 'Busy – 20 min wash';
+        case 1003:
+          return 'Busy – 50 min wash';
+      }
     }
+    if (isCompleted) return 'Cycle Complete';
+    if (isOffline) return 'Offline';
+    return 'Unavailable';
   }
 
   factory HubDeviceModel.fromJson(Map<String, dynamic> json) {
@@ -243,7 +242,6 @@ class HubDeviceModel {
         json['connectivityStatus'],
         fallback: 'offline',
       ),
-      // ── CHANGE 3: also accept 'iotStatus' or 'status' from backend ──
       iotStatusCode:
           _safeInt(json['iotStatusCode']) ??
           _safeInt(json['iotStatus']) ??
@@ -477,6 +475,19 @@ class WashHistoryModel {
     final device = json['Device'] as Map<String, dynamic>?;
     final pkg = json['HubPackage'] as Map<String, dynamic>?;
 
+    // ── FIX: use 'deviceCode' field, not 'deviceId' ──────────────────
+    // Also check top-level json in case backend sends it flat
+    final String? resolvedDeviceCode =
+        device?['deviceCode']?.toString() ??
+        device?['id']?.toString() ??
+        json['deviceCode']?.toString();
+
+    final String? resolvedDeviceName =
+        device?['deviceName']?.toString() ?? json['deviceName']?.toString();
+
+    final String? resolvedDeviceCondition =
+        device?['condition']?.toString() ?? json['condition']?.toString();
+
     return WashHistoryModel(
       id: _safeInt(json['id']) ?? 0,
       userId: _safeInt(json['userId']) ?? 0,
@@ -498,11 +509,11 @@ class WashHistoryModel {
       createdAt: json['createdAt'] != null
           ? DateTime.tryParse(json['createdAt'].toString())
           : null,
-      hubName: hub?['hubName']?.toString(),
+      hubName: hub?['hubName']?.toString() ?? json['hubName']?.toString(),
       hubAddress: hub?['address']?.toString(),
-      deviceCode: device?['deviceId']?.toString(),
-      deviceName: device?['deviceName']?.toString(),
-      deviceCondition: device?['condition']?.toString(),
+      deviceCode: resolvedDeviceCode,
+      deviceName: resolvedDeviceName,
+      deviceCondition: resolvedDeviceCondition,
     );
   }
 

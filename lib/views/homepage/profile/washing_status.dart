@@ -1,7 +1,10 @@
-// lib/views/homepage/profile/washing_status.dart
-
 import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:wash_user/models/usermodel.dart';
+import 'package:wash_user/services/api_service.dart';
 import 'package:wash_user/services/washing_session.dart';
 import 'package:wash_user/views/home.dart';
 import 'package:wash_user/views/wash_completed_screen.dart';
@@ -34,21 +37,20 @@ class WashingStatus extends StatefulWidget {
 
 class _WashingStatusState extends State<WashingStatus>
     with TickerProviderStateMixin {
-  // ── Animation controllers ─────────────────────────────────────────────────
   late AnimationController _spinController;
   late AnimationController _pulseController;
   late Animation<double> _pulseAnim;
 
-  // ── Navigation guard: prevents double-navigation ──────────────────────────
   bool _navigated = false;
-
-  // ── Status display text ───────────────────────────────────────────────────
   String _statusText = 'Washing';
 
-  // ── Listener reference ────────────────────────────────────────────────────
   late final VoidCallback _sessionListener;
 
-  // ── Helpers ───────────────────────────────────────────────────────────────
+  // ✅ FIX: increased from 30 s → 120 s to give machine enough time to ping
+  static const int _machineWaitTimeoutSeconds = 120;
+  int _waitingSeconds = 0;
+  Timer? _waitingTimer;
+
   int get _remainingSeconds => WashSessionManager.instance.remainingSeconds;
   int get _displayMinutes => _remainingSeconds ~/ 60;
   int get _displaySeconds => _remainingSeconds % 60;
@@ -57,6 +59,40 @@ class _WashingStatusState extends State<WashingStatus>
   @override
   void initState() {
     super.initState();
+
+    // ✅ FIX: waiting timer properly checks machineStarted BEFORE incrementing
+    _waitingTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+
+      final session = WashSessionManager.instance;
+
+      // Machine started — stop waiting timer immediately
+      if (session.machineStarted) {
+        debugPrint('✅ Machine started — stopping waiting timer');
+        timer.cancel();
+        return;
+      }
+
+      setState(() => _waitingSeconds++);
+      debugPrint('⏳ Waiting for machine... $_waitingSeconds sec');
+
+      // ✅ FIX: 120 s timeout instead of 30 s
+      if (_waitingSeconds > _machineWaitTimeoutSeconds) {
+        timer.cancel();
+        if (mounted && !_navigated) {
+          _navigated = true;
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Machine not responding. Please contact support.'),
+            ),
+          );
+          _goHome();
+        }
+      }
+    });
 
     _spinController = AnimationController(
       vsync: this,
@@ -74,34 +110,52 @@ class _WashingStatusState extends State<WashingStatus>
 
     _sessionListener = () {
       if (!mounted) return;
+
       final session = WashSessionManager.instance;
 
-      if (session.remainingSeconds > 0 && !session.isComplete) {
-        setState(() => _statusText = 'Washing');
-      }
+      // Update status text
+      setState(() {
+        _statusText = session.machineStarted
+            ? 'Washing'
+            : 'Waiting for machine...';
+      });
 
-      // CASE A: Wash completed → navigate to WashCompletedScreen
+      // ── CASE A: Wash completed ─────────────────────────────────────
       if (session.isComplete && !_navigated) {
         _navigated = true;
         _spinController.stop();
+
+        final String snapPackage =
+            session.packageName ?? widget.packageName ?? '';
+        final double snapAmount = session.amountPaid;
+        final String snapDevice = session.deviceCode ?? widget.deviceCode ?? '';
+        final String snapHub = session.hubName ?? widget.hubName ?? '';
+        final String? snapPayment = session.paymentId ?? widget.paymentId;
+
+        debugPrint('✅ [WashingStatus] Wash complete — navigating');
+
         Navigator.pushReplacement(
           context,
           MaterialPageRoute(
             builder: (_) => WashCompletedScreen(
-              packageName: session.packageName ?? widget.packageName ?? '',
-              amountPaid: session.amountPaid,
-              deviceCode: session.deviceCode ?? widget.deviceCode ?? '',
-              hubName: session.hubName ?? widget.hubName ?? '',
-              paymentId: session.paymentId ?? widget.paymentId,
+              packageName: snapPackage,
+              amountPaid: snapAmount,
+              deviceCode: snapDevice,
+              hubName: snapHub,
+              paymentId: snapPayment,
             ),
           ),
-        ).then((_) => session.clearSession());
+        ).then((_) {
+          session.clearSession();
+        });
+
         return;
       }
 
-      // CASE B: Session cleared by error threshold → go home
+      // ── CASE B: Session cleared externally ────────────────────────
       if (!session.isActive && !_navigated) {
         _navigated = true;
+        debugPrint('⚠️ Session cleared → going home');
         _goHome();
         return;
       }
@@ -114,34 +168,24 @@ class _WashingStatusState extends State<WashingStatus>
 
   @override
   void dispose() {
+    _waitingTimer?.cancel();
     WashSessionManager.instance.removeListener(_sessionListener);
     _spinController.dispose();
     _pulseController.dispose();
     super.dispose();
   }
 
-  // ── Go home ───────────────────────────────────────────────────────────────
-  // Pops entire nav stack back to Homepage, then resets the tab to Map (0).
-  // Session keeps running in background. User can return to app to check.
   void _goHome() {
     Navigator.pushReplacement(
       context,
-      MaterialPageRoute(builder: (context) => Homepage()),
+      MaterialPageRoute(builder: (_) => const Homepage()),
     );
-    // Navigator.of(context).popUntil((r) => r.isFirst);
-    // // Reset Homepage's IndexedStack to the Map tab (index 0) after pop settles.
-    // WidgetsBinding.instance.addPostFrameCallback((_) {
-    //   Homepage.homeKey.currentState?.resetToMapTab();
-    // });
   }
 
-  // ── Pull-to-refresh ───────────────────────────────────────────────────────
   Future<void> _onRefresh() async {
     await Future.delayed(const Duration(milliseconds: 600));
     if (mounted) setState(() {});
   }
-
-  // ── Build ─────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
@@ -152,8 +196,6 @@ class _WashingStatusState extends State<WashingStatus>
       },
       child: Scaffold(
         backgroundColor: Colors.grey[100],
-
-        // ── AppBar with back arrow + LIVE badge ────────────────────────────
         appBar: AppBar(
           backgroundColor: const Color(0xFF00BCD4),
           elevation: 0,
@@ -202,8 +244,6 @@ class _WashingStatusState extends State<WashingStatus>
             ),
           ],
         ),
-
-        // ── Body wrapped in RefreshIndicator ───────────────────────────────
         body: RefreshIndicator(
           onRefresh: _onRefresh,
           color: const Color(0xFF00BCD4),
@@ -218,8 +258,6 @@ class _WashingStatusState extends State<WashingStatus>
       ),
     );
   }
-
-  // ── Top section ───────────────────────────────────────────────────────────
 
   Widget _buildTopSection(BuildContext context) {
     return Container(
@@ -236,19 +274,18 @@ class _WashingStatusState extends State<WashingStatus>
           const SizedBox(height: 32),
           _buildMachineIcon(),
           const SizedBox(height: 24),
-
-          const Row(
+          Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(
+              const Icon(
                 Icons.local_laundry_service_outlined,
                 color: Colors.white,
                 size: 22,
               ),
-              SizedBox(width: 8),
+              const SizedBox(width: 8),
               Text(
-                'Washing',
-                style: TextStyle(
+                _statusText,
+                style: const TextStyle(
                   color: Colors.white,
                   fontSize: 22,
                   fontWeight: FontWeight.w600,
@@ -256,11 +293,9 @@ class _WashingStatusState extends State<WashingStatus>
               ),
             ],
           ),
-
           const SizedBox(height: 18),
           _buildRemainingTime(),
           const SizedBox(height: 28),
-
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 20),
             child: Row(
@@ -286,7 +321,6 @@ class _WashingStatusState extends State<WashingStatus>
               ],
             ),
           ),
-
           const SizedBox(height: 28),
         ],
       ),
@@ -409,8 +443,6 @@ class _WashingStatusState extends State<WashingStatus>
     );
   }
 
-  // ── Bottom section ────────────────────────────────────────────────────────
-
   Widget _buildBottomSection() {
     return Container(
       width: double.infinity,
@@ -440,9 +472,7 @@ class _WashingStatusState extends State<WashingStatus>
               ),
             ],
           ),
-
           const SizedBox(height: 12),
-
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
             decoration: BoxDecoration(
@@ -513,9 +543,7 @@ class _WashingStatusState extends State<WashingStatus>
               ],
             ),
           ),
-
           const SizedBox(height: 20),
-
           Container(
             width: double.infinity,
             padding: const EdgeInsets.all(14),

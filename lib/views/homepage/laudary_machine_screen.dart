@@ -1,9 +1,11 @@
-// lib/screens/laundry_machine_screen.dart
+import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:wash_user/models/usermodel.dart';
 import 'package:wash_user/services/api_service.dart';
+import 'package:wash_user/services/washing_session.dart';
 import 'package:wash_user/views/qrscanner/booking_machine_page.dart';
 
 class LaundryMachineScreen extends StatefulWidget {
@@ -27,18 +29,60 @@ class _LaundryMachineScreenState extends State<LaundryMachineScreen> {
   bool _loadingDevice = true;
   HubDeviceModel? _deviceDetails;
 
+  late Timer _refreshTimer;
+
   @override
   void initState() {
     super.initState();
     _loadDeviceDetails();
+    _refreshTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
+      if (!mounted) return;
+      _loadDeviceDetails();
+    });
   }
 
+  @override
+  void dispose() {
+    _refreshTimer.cancel();
+    super.dispose();
+  }
+
+  // ── ✅ isBookButtonEnabled with debug prints ───────────────────────
+  bool isBookButtonEnabled(HubDeviceModel device) {
+    final session = WashSessionManager.instance;
+
+    final isIdle =
+        device.iotStatusCode == 0; // removed connectivityStatus check
+    final machineStarted = session.machineStarted;
+    final canBook = isIdle && !machineStarted;
+
+    debugPrint('┌─ [isBookButtonEnabled] ──────────────────────────');
+    debugPrint('│  iotStatusCode   : ${device.iotStatusCode}');
+    debugPrint('│  connectivity    : ${device.connectivityStatus}');
+    debugPrint('│  isIdle          : $isIdle');
+    debugPrint('│  machineStarted  : $machineStarted');
+    debugPrint('│  canBook         : $canBook');
+    debugPrint('└──────────────────────────────────────────────────');
+
+    return canBook;
+  }
+
+  // ── Load device details from API ──────────────────────────────────
   Future<void> _loadDeviceDetails() async {
     setState(() => _loadingDevice = true);
+
+    debugPrint('┌─ [_loadDeviceDetails] ───────────────────────────');
+    debugPrint('│  hubId    : ${widget.hub.id}');
+    debugPrint('│  deviceId : ${widget.device.id}');
+
     final result = await ApiService.getHubDeviceDetails(
       widget.hub.id.toString(),
       widget.device.id.toString(),
     );
+
+    debugPrint('│  success  : ${result.success}');
+    debugPrint('│  rawData  : ${result.data}');
+
     if (!mounted) return;
     setState(() {
       _loadingDevice = false;
@@ -48,23 +92,45 @@ class _LaundryMachineScreenState extends State<LaundryMachineScreen> {
             result.data!['device'] ??
             result.data!['data'] ??
             result.data!;
-        _deviceDetails = raw is Map<String, dynamic>
-            ? HubDeviceModel.fromJson(raw)
-            : widget.device;
+
+        debugPrint('│  resolvedRaw : $raw');
+
+        if (raw is Map<String, dynamic>) {
+          _deviceDetails = HubDeviceModel.fromJson(raw);
+          debugPrint(
+            '│  iotStatusCode (parsed) : ${_deviceDetails!.iotStatusCode}',
+          );
+          debugPrint(
+            '│  iotStatusLabel         : ${_deviceDetails!.iotStatusLabel}',
+          );
+          debugPrint(
+            '│  connectivityStatus     : ${_deviceDetails!.connectivityStatus}',
+          );
+        } else {
+          debugPrint('│  ⚠ raw is not a Map — falling back to widget.device');
+          _deviceDetails = widget.device;
+        }
       } else {
+        debugPrint(
+          '│  ⚠ API failed or data null — falling back to widget.device',
+        );
         _deviceDetails = widget.device;
       }
     });
+
+    debugPrint('└──────────────────────────────────────────────────');
   }
 
   // ── Navigate to BookMachineScreen on button tap ────────────────────
-  // FIXED: isOnline is now iotStatusCode == 0 (IDLE only)
   void _goToBooking() {
     final device = _deviceDetails ?? widget.device;
-    if (!device.isOnline) {
+    debugPrint('[_goToBooking] tapped — checking isBookButtonEnabled...');
+    if (!isBookButtonEnabled(device)) {
+      debugPrint('[_goToBooking] ❌ booking blocked');
       _snack('Machine is not available', error: true);
       return;
     }
+    debugPrint('[_goToBooking] ✅ navigating to BookMachineScreen');
     Navigator.push(
       context,
       MaterialPageRoute(
@@ -84,10 +150,6 @@ class _LaundryMachineScreenState extends State<LaundryMachineScreen> {
     );
   }
 
-  // ── Status dot color based on iotStatusCode ────────────────────────
-  // 0 (IDLE)     → green
-  // 2000 (DONE)  → amber
-  // 1001/1002/1003 (BUSY) → red
   Color _statusDotColor(HubDeviceModel device) {
     switch (device.iotStatusCode) {
       case 0:
@@ -144,7 +206,6 @@ class _LaundryMachineScreenState extends State<LaundryMachineScreen> {
     );
   }
 
-  // ── Header ─────────────────────────────────────────────────────────
   Widget _buildHeader() {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -181,7 +242,6 @@ class _LaundryMachineScreenState extends State<LaundryMachineScreen> {
     );
   }
 
-  // ── Feature row ────────────────────────────────────────────────────
   Widget _buildFeaturesRow(double screenW) {
     final thumbSize = screenW < 360 ? 76.0 : 88.0;
     return Row(
@@ -200,7 +260,7 @@ class _LaundryMachineScreenState extends State<LaundryMachineScreen> {
             child: Image.asset(
               'assets/images/washing_machine.png',
               fit: BoxFit.cover,
-              errorBuilder: (_, __, ___) => const Icon(
+              errorBuilder: (_, _, _) => const Icon(
                 Icons.local_laundry_service,
                 color: Colors.white38,
                 size: 38,
@@ -234,7 +294,6 @@ class _LaundryMachineScreenState extends State<LaundryMachineScreen> {
     );
   }
 
-  // ── Gradient machine card ──────────────────────────────────────────
   Widget _buildMachineCard(HubDeviceModel device, double screenW) {
     final iconBoxSize = screenW < 360 ? 56.0 : 64.0;
     return Container(
@@ -252,7 +311,6 @@ class _LaundryMachineScreenState extends State<LaundryMachineScreen> {
         children: [
           Row(
             children: [
-              // FIXED: dot color driven by iotStatusCode, not connectivityStatus
               Container(
                 width: 11,
                 height: 11,
@@ -265,7 +323,6 @@ class _LaundryMachineScreenState extends State<LaundryMachineScreen> {
                 ),
               ),
               const SizedBox(width: 8),
-              // FIXED: label driven by iotStatusLabel (iotStatusCode switch)
               Text(
                 device.iotStatusLabel,
                 style: const TextStyle(
@@ -395,10 +452,11 @@ class _LaundryMachineScreenState extends State<LaundryMachineScreen> {
     );
   }
 
-  // ── Bottom Book Machine button ─────────────────────────────────────
-  // FIXED: enabled only when iotStatusCode == 0 (IDLE), via device.isOnline
+  // ── ✅ _buildBookButton uses isBookButtonEnabled() ─────────────────
   Widget _buildBookButton(HubDeviceModel device) {
     final bottomInset = MediaQuery.of(context).padding.bottom;
+    final canBook = isBookButtonEnabled(device);
+
     return Container(
       color: Colors.black,
       padding: EdgeInsets.fromLTRB(20, 10, 20, bottomInset + 16),
@@ -406,7 +464,7 @@ class _LaundryMachineScreenState extends State<LaundryMachineScreen> {
         width: double.infinity,
         height: 52,
         child: ElevatedButton(
-          onPressed: device.isOnline ? _goToBooking : null,
+          onPressed: canBook ? _goToBooking : null,
           style: ElevatedButton.styleFrom(
             backgroundColor: Colors.transparent,
             shadowColor: Colors.transparent,
@@ -419,23 +477,22 @@ class _LaundryMachineScreenState extends State<LaundryMachineScreen> {
           ),
           child: Ink(
             decoration: BoxDecoration(
-              gradient: device.isOnline
+              gradient: canBook
                   ? const LinearGradient(
                       colors: [Color(0xFF00E0FF), Color(0xFF00ADCF)],
                     )
                   : null,
-              color: device.isOnline ? null : Colors.grey.shade800,
+              color: canBook ? null : Colors.grey.shade800,
               borderRadius: BorderRadius.circular(32),
             ),
             child: Container(
               alignment: Alignment.center,
-              // FIXED: button label uses iotStatusLabel for non-idle states
               child: Text(
-                device.isOnline ? 'Book Machine' : device.iotStatusLabel,
-                style: const TextStyle(
+                canBook ? 'Book Machine' : device.iotStatusLabel,
+                style: TextStyle(
                   fontSize: 17,
                   fontWeight: FontWeight.w700,
-                  color: Colors.black,
+                  color: canBook ? Colors.black : Colors.white,
                   letterSpacing: 0.3,
                 ),
               ),

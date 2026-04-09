@@ -1,5 +1,4 @@
 // lib/services/api_service.dart
-// Covers all routes from userRoutes.js
 
 import 'dart:async';
 import 'dart:convert';
@@ -8,10 +7,10 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 class ApiService {
-  // ── Base URL ─────────────────────────────────────────────────────────
+  // ── Base URL ───────────────────────────────────────────────────────────
   static const String baseUrl = "https://be.washist.com/api/user";
 
-  // ── Token Storage ─────────────────────────────────────────────────────
+  // ── Token Storage ──────────────────────────────────────────────────────
   static Future<void> saveToken(String token) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('auth_token', token);
@@ -27,7 +26,7 @@ class ApiService {
     await prefs.remove('auth_token');
   }
 
-  // ── Headers ───────────────────────────────────────────────────────────
+  // ── Headers ────────────────────────────────────────────────────────────
   static Map<String, String> get _jsonHeaders => {
     'Content-Type': 'application/json',
   };
@@ -187,7 +186,8 @@ class ApiService {
 
   // ─────────────────────────────────────────────────────────────────────
   // 6. GET HUB DEVICE DETAILS
-  // GET /api/user/hub/:hubId/devices/:hubdeviceId  [auth required]
+  // GET /api/user/hub/:hubId/devices/:hubDeviceId  [auth required]
+  // Used by WashSessionManager every 10 s to read iotStatusCode
   // ─────────────────────────────────────────────────────────────────────
   static Future<ApiResult> getHubDeviceDetails(
     String hubId,
@@ -280,6 +280,7 @@ class ApiService {
     const couponBaseUrl = "https://be.washist.com/api/coupon";
     try {
       developer.log('── VALIDATE COUPON ───────────────', name: 'ApiService');
+
       final response = await http
           .post(
             Uri.parse('$couponBaseUrl/verify-coupon'),
@@ -307,6 +308,9 @@ class ApiService {
     Map<String, dynamic> feedbackData,
   ) async {
     try {
+      developer.log('── SUBMIT FEEDBACK ───────────────', name: 'ApiService');
+      developer.log('BODY : ${jsonEncode(feedbackData)}', name: 'ApiService');
+
       final response = await http
           .post(
             Uri.parse('$baseUrl/submit-feedback'),
@@ -314,6 +318,9 @@ class ApiService {
             body: jsonEncode(feedbackData),
           )
           .timeout(const Duration(seconds: 15));
+
+      developer.log('STATUS : ${response.statusCode}', name: 'ApiService');
+      developer.log('BODY   : ${response.body}', name: 'ApiService');
       return _handleResponse(response);
     } on TimeoutException {
       return ApiResult.error('Request timed out.');
@@ -328,9 +335,14 @@ class ApiService {
   // ─────────────────────────────────────────────────────────────────────
   static Future<ApiResult> getWashHistory() async {
     try {
+      developer.log('── GET WASH HISTORY ──────────────', name: 'ApiService');
+
       final response = await http
           .get(Uri.parse('$baseUrl/wash-history'), headers: await _authHeaders)
           .timeout(const Duration(seconds: 15));
+
+      developer.log('STATUS : ${response.statusCode}', name: 'ApiService');
+      developer.log('BODY   : ${response.body}', name: 'ApiService');
       return _handleResponse(response);
     } on TimeoutException {
       return ApiResult.error('Request timed out.');
@@ -386,7 +398,6 @@ class ApiService {
   static Future<ApiResult> getActiveWash() async {
     try {
       developer.log('── GET ACTIVE WASH ───────────────', name: 'ApiService');
-      developer.log('URL  : $baseUrl/active-wash', name: 'ApiService');
 
       final response = await http
           .get(Uri.parse('$baseUrl/active-wash'), headers: await _authHeaders)
@@ -395,14 +406,12 @@ class ApiService {
       developer.log('STATUS : ${response.statusCode}', name: 'ApiService');
       developer.log('BODY   : ${response.body}', name: 'ApiService');
 
-      // ── HTML 404 guard ────────────────────────────────────────────────
-      // If Express hasn't registered the route yet it returns an HTML page.
-      // Treat it as "no active wash" so the UI shows Idle instead of crashing.
+      // HTML 404 guard — route not deployed yet
       if (response.statusCode == 404) {
         final body = response.body.trim();
         if (body.startsWith('<!DOCTYPE') || body.startsWith('<html')) {
           developer.log(
-            'WARN  : /active-wash route not on server yet — returning idle',
+            'WARN  : /active-wash not on server yet — returning idle',
             name: 'ApiService',
           );
           return ApiResult.success({'activeOrder': null});
@@ -418,7 +427,89 @@ class ApiService {
     }
   }
 
-  // ── Response Handler ──────────────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────────────
+  // 16. CREATE SERVICE TICKET
+  // POST /api/user/service-ticket  [auth required]
+  // ─────────────────────────────────────────────────────────────────────
+  static Future<void> createServiceTicket({
+    required String deviceId,
+    required String issue,
+    String? bookingId,
+  }) async {
+    try {
+      developer.log('── CREATE SERVICE TICKET ─────────', name: 'ApiService');
+
+      final response = await http
+          .post(
+            Uri.parse('$baseUrl/service-ticket'),
+            headers: await _authHeaders,
+            body: jsonEncode({
+              'deviceId': deviceId,
+              'issue': issue,
+              if (bookingId != null) 'bookingId': bookingId,
+            }),
+          )
+          .timeout(const Duration(seconds: 15));
+
+      developer.log('STATUS : ${response.statusCode}', name: 'ApiService');
+      developer.log('BODY   : ${response.body}', name: 'ApiService');
+
+      if (response.statusCode != 200 && response.statusCode != 201) {
+        throw Exception(
+          'Failed to create service ticket: ${response.statusCode}',
+        );
+      }
+    } on TimeoutException {
+      throw Exception('Request timed out.');
+    } catch (e) {
+      developer.log('ERROR : $e', name: 'ApiService', error: e);
+      rethrow;
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // 17. DEVICE PING (IoT)
+  // POST /api/device/ping  [NO AUTH]
+  // ✅ FIXED: uses /api/device base, NOT /api/user
+  // ─────────────────────────────────────────────────────────────────────
+  static Future<ApiResult> devicePing({
+    required int hubDeviceId,
+    required int currentStatusCode,
+  }) async {
+    // ✅ Separate base URL — ping goes to /api/device, not /api/user
+    const String deviceBaseUrl = "https://be.washist.com/api/device";
+    try {
+      developer.log('── DEVICE PING ───────────────', name: 'ApiService');
+      developer.log('URL  : $deviceBaseUrl/ping', name: 'ApiService');
+      developer.log(
+        'BODY : hubDeviceId=$hubDeviceId  currentStatusCode=$currentStatusCode',
+        name: 'ApiService',
+      );
+
+      final response = await http
+          .post(
+            Uri.parse('$deviceBaseUrl/ping'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'hubDeviceId': hubDeviceId,
+              'currentStatusCode': currentStatusCode,
+            }),
+          )
+          .timeout(const Duration(seconds: 10));
+
+      developer.log('STATUS : ${response.statusCode}', name: 'ApiService');
+      developer.log('BODY   : ${response.body}', name: 'ApiService');
+
+      return _handleResponse(response);
+    } on TimeoutException {
+      return ApiResult.error('Ping timed out.');
+    } catch (e) {
+      developer.log('ERROR : $e', name: 'ApiService', error: e);
+      return ApiResult.error('Ping network error: $e');
+    }
+  }
+
+  // ── Response Handler ───────────────────────────────────────────────────
   static ApiResult _handleResponse(http.Response response) {
     dynamic decoded;
     try {
@@ -444,33 +535,9 @@ class ApiService {
       return ApiResult.error(message);
     }
   }
-
-  Future<void> createServiceTicket({
-    required String deviceId,
-    required String issue,
-    String? bookingId,
-  }) async {
-    final response = await http.post(
-      Uri.parse("$baseUrl/service-ticket"), // 🔁 change if your route differs
-      headers: {
-        "Content-Type": "application/json",
-        // add token if needed
-        // "Authorization": "Bearer $token",
-      },
-      body: jsonEncode({
-        "deviceId": deviceId,
-        "issue": issue,
-        "bookingId": bookingId,
-      }),
-    );
-
-    if (response.statusCode != 200 && response.statusCode != 201) {
-      throw Exception("Failed to create service ticket");
-    }
-  }
 }
 
-// ── ApiResult ─────────────────────────────────────────────────────────────
+// ── ApiResult ──────────────────────────────────────────────────────────────
 class ApiResult {
   final bool success;
   final Map<String, dynamic>? data;

@@ -54,6 +54,18 @@
 
         <!-- url_launcher: WhatsApp -->
         <package android:name="com.whatsapp"/>
+
+        <!-- url_launcher: Google Maps / https links -->
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="https"/>
+        </intent>
+
+        <!-- url_launcher: geo links (native maps apps) -->
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="geo"/>
+        </intent>
     </queries>
 
 </manifest>

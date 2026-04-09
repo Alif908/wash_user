@@ -1,6 +1,7 @@
 // lib/views/homepage/profile/my_booking.dart
 
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:wash_user/models/usermodel.dart';
 import 'package:wash_user/services/api_service.dart';
 
@@ -32,18 +33,24 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> {
     if (!mounted) return;
 
     if (result.success) {
-      final list =
+      // ── FIX: log raw keys so you can see exactly what backend returns ──
+      debugPrint('[MyBookings] raw response keys: ${result.data?.keys}');
+      debugPrint('[MyBookings] raw response: ${result.data}');
+
+      // ── FIX: try every possible wrapper key including Sequelize 'rows' ──
+      final dynamic rawList =
           result.data?['washHistories'] ??
           result.data?['washes'] ??
+          result.data?['rows'] ?? // Sequelize findAndCountAll uses 'rows'
           result.data?['data'] ??
           result.data?['history'] ??
           [];
 
       final List<WashHistoryModel> parsed = [];
-      for (int i = 0; i < (list as List).length; i++) {
+      for (int i = 0; i < (rawList as List).length; i++) {
         try {
           parsed.add(
-            WashHistoryModel.fromJson(list[i] as Map<String, dynamic>),
+            WashHistoryModel.fromJson(rawList[i] as Map<String, dynamic>),
           );
         } catch (e) {
           debugPrint('[MyBookings] parse error at index $i: $e');
@@ -184,7 +191,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> {
                             physics: const AlwaysScrollableScrollPhysics(),
                             padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
                             itemCount: _bookings.length,
-                            separatorBuilder: (_, __) =>
+                            separatorBuilder: (_, _) =>
                                 const SizedBox(height: 16),
                             itemBuilder: (context, index) =>
                                 _BookingCard(booking: _bookings[index]),
@@ -198,7 +205,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// BOOKING CARD — matches the image UI
+// BOOKING CARD
 // ─────────────────────────────────────────────────────────────────────────────
 class _BookingCard extends StatefulWidget {
   final WashHistoryModel booking;
@@ -209,7 +216,6 @@ class _BookingCard extends StatefulWidget {
 }
 
 class _BookingCardState extends State<_BookingCard> {
-  // Star rating state (per card, local only)
   int _starRating = 0;
 
   static const Color _cyan = Color(0xFF29B6F6);
@@ -224,14 +230,12 @@ class _BookingCardState extends State<_BookingCard> {
     final b = widget.booking;
     final bool isCompleted = b.isCompleted;
 
-    // Derived values
     final double basePrice = b.amount;
     final double discountAmt = basePrice - b.finalAmount;
     final bool hasDiscount = discountAmt > 0;
     final String machineName = b.deviceName ?? b.deviceCode ?? '—';
     final String deviceId = b.deviceCode ?? '—';
 
-    // Format booking time  (e.g. "06:30 pm")
     final String bookingTime = _formatTime(b.washStartTime);
     final String bookingDate = _formatDateShort(b.washStartTime);
 
@@ -274,7 +278,7 @@ class _BookingCardState extends State<_BookingCard> {
                   ],
                 ),
                 GestureDetector(
-                  onTap: () {}, // extend with detail page if needed
+                  onTap: () {},
                   child: const Row(
                     children: [
                       Text(
@@ -328,10 +332,7 @@ class _BookingCardState extends State<_BookingCard> {
           // ── Detail rows ──────────────────────────────────────────────
           _detailRow('Device ID', deviceId),
           _detailRow('Machine', machineName),
-          _detailRow(
-            'Power',
-            '1000 W',
-          ), // static — add to model if backend provides
+          _detailRow('Power', '1000 W'),
           _detailRow('Price', '₹ ${basePrice.toStringAsFixed(2)}'),
           _detailRow('Platform Fee', '₹ 0'),
           if (hasDiscount)
@@ -375,7 +376,6 @@ class _BookingCardState extends State<_BookingCard> {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                // Stars
                 Row(
                   children: List.generate(5, (i) {
                     return GestureDetector(
@@ -417,7 +417,6 @@ class _BookingCardState extends State<_BookingCard> {
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
             child: Row(
               children: [
-                // Need Help — outlined
                 Expanded(
                   child: OutlinedButton(
                     onPressed: () => _showHelpDialog(context),
@@ -439,7 +438,6 @@ class _BookingCardState extends State<_BookingCard> {
                   ),
                 ),
                 const SizedBox(width: 12),
-                // Locate — filled cyan
                 Expanded(
                   child: ElevatedButton.icon(
                     onPressed: () => _openLocation(b),
@@ -562,16 +560,26 @@ class _BookingCardState extends State<_BookingCard> {
 
   // ── Action handlers ──────────────────────────────────────────────────────
 
-  void _openLocation(WashHistoryModel b) {
-    // TODO: integrate with url_launcher to open maps
+  void _openLocation(WashHistoryModel b) async {
+  final address = b.hubName ?? 'laundry';
+  final query = Uri.encodeComponent(address);
+  final uri = Uri.parse(
+    'https://www.google.com/maps/search/?api=1&query=$query',
+  );
+
+  if (await canLaunchUrl(uri)) {
+    await launchUrl(uri, mode: LaunchMode.externalApplication);
+  } else {
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Locating ${b.hubName ?? "hub"}...'),
-        backgroundColor: const Color(0xFF29B6F6),
+      const SnackBar(
+        content: Text('Could not open Google Maps'),
+        backgroundColor: Colors.red,
         behavior: SnackBarBehavior.floating,
       ),
     );
   }
+}
 
   void _showHelpDialog(BuildContext context) {
     showDialog(
@@ -602,80 +610,116 @@ class _BookingCardState extends State<_BookingCard> {
 
   void _showReviewDialog(BuildContext context, WashHistoryModel b) {
     final ctrl = TextEditingController();
+
+    // ── FIX: local dialog rating so stars update inside the dialog ────
+    // dialogRating is owned by StatefulBuilder — separate from _starRating
+    // on the card. Both stay in sync on tap.
+    int dialogRating = _starRating;
+
     showDialog(
       context: context,
-      builder: (_) => AlertDialog(
-        backgroundColor: const Color(0xFF1A1A1A),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text(
-          'Add a Review',
-          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // Stars inside dialog
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: List.generate(5, (i) {
-                return GestureDetector(
-                  onTap: () => setState(() => _starRating = i + 1),
-                  child: Icon(
-                    i < _starRating
-                        ? Icons.star_rounded
-                        : Icons.star_outline_rounded,
-                    color: i < _starRating ? Colors.amber : Colors.white38,
-                    size: 32,
+      builder: (_) => StatefulBuilder(
+        // ── FIX: StatefulBuilder gives us setDialogState so the
+        //         star row inside the dialog actually rebuilds on tap ──
+        builder: (ctx, setDialogState) => AlertDialog(
+          backgroundColor: const Color(0xFF1A1A1A),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+          ),
+          title: const Text(
+            'Add a Review',
+            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Stars inside dialog — now reactive
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: List.generate(5, (i) {
+                  return GestureDetector(
+                    onTap: () {
+                      setDialogState(() => dialogRating = i + 1); // dialog
+                      setState(() => _starRating = i + 1); // card
+                    },
+                    child: Icon(
+                      i < dialogRating
+                          ? Icons.star_rounded
+                          : Icons.star_outline_rounded,
+                      color: i < dialogRating ? Colors.amber : Colors.white38,
+                      size: 32,
+                    ),
+                  );
+                }),
+              ),
+              const SizedBox(height: 14),
+              TextField(
+                controller: ctrl,
+                maxLines: 3,
+                style: const TextStyle(color: Colors.white),
+                decoration: InputDecoration(
+                  hintText: 'Write your review...',
+                  hintStyle: const TextStyle(color: Colors.white38),
+                  filled: true,
+                  fillColor: Colors.white10,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: BorderSide.none,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text(
+                'Cancel',
+                style: TextStyle(color: Colors.white54),
+              ),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                // Close dialog first so the user isn't waiting with it open
+                Navigator.pop(context);
+
+                // ── FIX: actually call the feedback API ───────────────
+                final res = await ApiService.submitFeedback({
+                  'orderId': b.orderId,
+                  'hubId': b.hubId,
+                  'deviceId': b.deviceId,
+                  'rating': dialogRating,
+                  'comment': ctrl.text.trim(),
+                });
+
+                if (!mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(
+                      res.success
+                          ? 'Review submitted!'
+                          : res.errorMessage ?? 'Failed to submit review',
+                    ),
+                    backgroundColor: res.success
+                        ? const Color(0xFF29B6F6)
+                        : Colors.red,
+                    behavior: SnackBarBehavior.floating,
                   ),
                 );
-              }),
-            ),
-            const SizedBox(height: 14),
-            TextField(
-              controller: ctrl,
-              maxLines: 3,
-              style: const TextStyle(color: Colors.white),
-              decoration: InputDecoration(
-                hintText: 'Write your review...',
-                hintStyle: const TextStyle(color: Colors.white38),
-                filled: true,
-                fillColor: Colors.white10,
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: BorderSide.none,
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF29B6F6),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(20),
                 ),
+              ),
+              child: const Text(
+                'Submit',
+                style: TextStyle(color: Colors.white),
               ),
             ),
           ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text(
-              'Cancel',
-              style: TextStyle(color: Colors.white54),
-            ),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              Navigator.pop(context);
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('Review submitted!'),
-                  backgroundColor: Color(0xFF29B6F6),
-                  behavior: SnackBarBehavior.floating,
-                ),
-              );
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF29B6F6),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(20),
-              ),
-            ),
-            child: const Text('Submit', style: TextStyle(color: Colors.white)),
-          ),
-        ],
       ),
     );
   }

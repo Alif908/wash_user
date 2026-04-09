@@ -1,10 +1,8 @@
 // lib/views/washing/wash_completed_screen.dart
-//
-// Auto-navigated to from WashingStatus when the countdown hits zero.
-// Back button is disabled — user must go to Home or Bookings.
 
 import 'package:flutter/material.dart';
 import 'package:wash_user/views/home.dart';
+import 'package:wash_user/views/homepage/profile/my_booking.dart';
 
 class WashCompletedScreen extends StatefulWidget {
   final String packageName;
@@ -33,6 +31,9 @@ class _WashCompletedScreenState extends State<WashCompletedScreen>
   late Animation<double> _fadeAnim;
   late Animation<double> _checkAnim;
 
+  // ✅ Tracks whether "MY BOOKINGS" is waiting for backend to save history
+  bool _bookingsLoading = false;
+
   static const Color _bg = Color(0xFF0A1628);
   static const Color _card = Color(0xFF112240);
   static const Color _cyan = Color(0xFF00BCD4);
@@ -41,6 +42,13 @@ class _WashCompletedScreenState extends State<WashCompletedScreen>
   @override
   void initState() {
     super.initState();
+
+    debugPrint('🎉 [WashCompleted] packageName = ${widget.packageName}');
+    debugPrint('🎉 [WashCompleted] amountPaid  = ${widget.amountPaid}');
+    debugPrint('🎉 [WashCompleted] deviceCode  = ${widget.deviceCode}');
+    debugPrint('🎉 [WashCompleted] hubName     = ${widget.hubName}');
+    debugPrint('🎉 [WashCompleted] paymentId   = ${widget.paymentId}');
+
     _ctrl = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 900),
@@ -63,9 +71,33 @@ class _WashCompletedScreenState extends State<WashCompletedScreen>
     super.dispose();
   }
 
+  // ── Navigation helpers ────────────────────────────────────────────
+
   void _goHome() {
     Navigator.of(context).pushAndRemoveUntil(
       MaterialPageRoute(builder: (_) => const Homepage()),
+      (route) => false,
+    );
+  }
+
+  // ✅ FIX: 10 second delay — backend WashHistory save cheyyaan time kodukkunnu
+  // IoT machine 2000 signal cheyyumbol mathramen backend record create cheyyoo,
+  // athu nadakkathe MyBookings open cheythal empty kaanikkum.
+  Future<void> _goToBookings() async {
+    if (_bookingsLoading) return;
+
+    setState(() => _bookingsLoading = true);
+
+    debugPrint(
+      '⏳ [WashCompleted] Waiting 10s for backend to save WashHistory...',
+    );
+    await Future.delayed(const Duration(seconds: 10));
+
+    if (!mounted) return;
+
+    debugPrint('✅ [WashCompleted] Navigating to MyBookings');
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const MyBookingsScreen()),
       (route) => false,
     );
   }
@@ -88,7 +120,7 @@ class _WashCompletedScreenState extends State<WashCompletedScreen>
               children: [
                 const Spacer(flex: 2),
 
-                // ── Animated card ─────────────────────────────────────────
+                // ── Animated summary card ─────────────────────────────
                 FadeTransition(
                   opacity: _fadeAnim,
                   child: ScaleTransition(
@@ -107,7 +139,7 @@ class _WashCompletedScreenState extends State<WashCompletedScreen>
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          // Green check
+                          // Green check icon
                           ScaleTransition(
                             scale: _checkAnim,
                             child: Container(
@@ -147,7 +179,7 @@ class _WashCompletedScreenState extends State<WashCompletedScreen>
 
                           const SizedBox(height: 28),
 
-                          // Detail rows
+                          // ── Detail rows ──────────────────────────────
                           Container(
                             width: double.infinity,
                             decoration: BoxDecoration(
@@ -172,6 +204,15 @@ class _WashCompletedScreenState extends State<WashCompletedScreen>
                                 ),
                                 _divider(),
                                 _row('Status', 'Completed', valueColor: _green),
+                                if (widget.paymentId != null &&
+                                    widget.paymentId!.isNotEmpty) ...[
+                                  _divider(),
+                                  _row(
+                                    'Payment ID',
+                                    widget.paymentId!,
+                                    small: true,
+                                  ),
+                                ],
                               ],
                             ),
                           ),
@@ -183,21 +224,70 @@ class _WashCompletedScreenState extends State<WashCompletedScreen>
 
                 const Spacer(flex: 2),
 
-                // ── Go Home button ────────────────────────────────────────
+                // ── MY BOOKINGS button ────────────────────────────────
                 FadeTransition(
                   opacity: _fadeAnim,
                   child: SizedBox(
                     width: double.infinity,
                     height: 54,
-                    child: ElevatedButton(
-                      onPressed: _goHome,
+                    child: ElevatedButton.icon(
+                      // ✅ Loading state: spinner kaanikkum, button disable aakum
+                      onPressed: _bookingsLoading ? null : _goToBookings,
+                      icon: _bookingsLoading
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                color: Colors.black,
+                                strokeWidth: 2.5,
+                              ),
+                            )
+                          : const Icon(
+                              Icons.receipt_long_outlined,
+                              color: Colors.black,
+                              size: 20,
+                            ),
+                      label: Text(
+                        _bookingsLoading ? 'Loading...' : 'MY BOOKINGS',
+                        style: const TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 1.2,
+                          color: Colors.black,
+                        ),
+                      ),
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: _cyan,
+                        backgroundColor: _bookingsLoading
+                            ? _cyan.withOpacity(0.5)
+                            : _cyan,
                         foregroundColor: Colors.black,
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(32),
                         ),
                         elevation: 0,
+                      ),
+                    ),
+                  ),
+                ),
+
+                const SizedBox(height: 12),
+
+                // ── GO HOME button ────────────────────────────────────
+                FadeTransition(
+                  opacity: _fadeAnim,
+                  child: SizedBox(
+                    width: double.infinity,
+                    height: 54,
+                    child: OutlinedButton(
+                      onPressed: _bookingsLoading ? null : _goHome,
+                      style: OutlinedButton.styleFrom(
+                        side: BorderSide(
+                          color: Colors.white.withOpacity(0.25),
+                          width: 1.5,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(32),
+                        ),
                       ),
                       child: const Text(
                         'GO TO HOME',
@@ -205,7 +295,7 @@ class _WashCompletedScreenState extends State<WashCompletedScreen>
                           fontSize: 15,
                           fontWeight: FontWeight.bold,
                           letterSpacing: 1.2,
-                          color: Colors.black,
+                          color: Colors.white70,
                         ),
                       ),
                     ),
@@ -219,7 +309,12 @@ class _WashCompletedScreenState extends State<WashCompletedScreen>
     );
   }
 
-  Widget _row(String label, String value, {Color? valueColor}) {
+  Widget _row(
+    String label,
+    String value, {
+    Color? valueColor,
+    bool small = false,
+  }) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
       child: Row(
@@ -227,7 +322,7 @@ class _WashCompletedScreenState extends State<WashCompletedScreen>
         children: [
           Text(
             label,
-            style: const TextStyle(color: Colors.white54, fontSize: 13),
+            style: TextStyle(color: Colors.white54, fontSize: small ? 11 : 13),
           ),
           Flexible(
             child: Text(
@@ -236,7 +331,7 @@ class _WashCompletedScreenState extends State<WashCompletedScreen>
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 color: valueColor ?? Colors.white,
-                fontSize: 13,
+                fontSize: small ? 11 : 13,
                 fontWeight: FontWeight.w600,
               ),
             ),

@@ -66,18 +66,24 @@
         var hubMarkerGroup = new H.map.Group();
         map.addObject(hubMarkerGroup);
 
-        // ── User location marker (cyan dot) ───────────────────────────────
+        // ── User location marker (Google Maps-style arrow) ────────────────
         function flutterSetUserMarker(lat, lng) {
             if (userMarker) map.removeObject(userMarker);
 
-            var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 40 40">'
-                + '<circle cx="20" cy="20" r="18" fill="rgba(0,207,255,0.2)" stroke="#00CFFF" stroke-width="2.5"/>'
-                + '<circle cx="20" cy="20" r="7" fill="#00CFFF"/>'
+            var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">'
+                + '<defs>'
+                + '<filter id="shadow" x="-50%" y="-50%" width="200%" height="200%">'
+                + '<feDropShadow dx="0" dy="2" stdDeviation="2.5" flood-color="rgba(0,0,0,0.45)"/>'
+                + '</filter>'
+                + '</defs>'
+                + '<g filter="url(#shadow)">'
+                + '<polygon points="24,3 44,44 24,35 4,44" fill="#00CFFF" stroke="#ffffff" stroke-width="2.5" stroke-linejoin="round"/>'
+                + '</g>'
                 + '</svg>';
 
             var icon = new H.map.Icon(svg, {
-                size: { w: 40, h: 40 },
-                anchor: { x: 20, y: 20 }
+                size: { w: 48, h: 48 },
+                anchor: { x: 24, y: 24 }
             });
 
             userMarker = new H.map.Marker({ lat: lat, lng: lng }, { icon: icon });
